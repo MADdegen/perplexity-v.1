@@ -71,6 +71,15 @@ jobs:
           ELEVENLABS_API_KEY: "stub"
           REDIS_URL: "redis://stub:6379"
           FIRECRAWL_API_KEY: "stub"
+          GOOGLE_GENERATIVE_AI_API_KEY: "stub"
+          DAYTONA_API_KEY: "stub"
+          BETTER_AUTH_SECRET: "stub-secret-32chars-minimum-pad"
+          GITHUB_CLIENT_ID: "stub"
+          GITHUB_CLIENT_SECRET: "stub"
+          GOOGLE_CLIENT_ID: "stub"
+          GOOGLE_CLIENT_SECRET: "stub"
+          TWITTER_CLIENT_ID: "stub"
+          TWITTER_CLIENT_SECRET: "stub"
 
       - name: Build size report
         run: |
