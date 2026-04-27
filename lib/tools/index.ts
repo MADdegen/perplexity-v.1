@@ -20,3 +20,4 @@ export { memoryManagerTool } from './memory-manager';
 export { redditSearchTool } from './reddit-search';
 export { extremeSearchTool } from './extreme-search';
 export { greetingTool } from './greeting';
+export { perplexitySearchTool, perplexityStructured } from './perplexity-search';
