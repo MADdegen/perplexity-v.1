@@ -1,0 +1,51 @@
+# .github/dependabot.yml
+# WHY: Automatically opens PRs for pnpm dependency bumps and GitHub Actions version updates.
+# Keeps AI SDK, Vercel, and security packages current with zero manual effort.
+# Pairs with 3-mcp-discovery.yml which tracks AI SDK releases manually for context.
+
+version: 2
+updates:
+  # pnpm / npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"      # Tuesday — after Monday upstream sync, before Wednesday MCP scan
+      time: "07:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 8
+    labels:
+      - "dependencies"
+      - "auto-update"
+    groups:
+      # AI SDK — bump all @ai-sdk/* together so they stay in sync
+      ai-sdk:
+        patterns:
+          - "@ai-sdk/*"
+          - "ai"
+      # Vercel platform
+      vercel:
+        patterns:
+          - "@vercel/*"
+          - "vercel"
+      # Anthropic SDK
+      anthropic:
+        patterns:
+          - "@anthropic-ai/*"
+    ignore:
+      # Pin major versions — require manual review for breaking changes
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "07:30"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "github-actions"
+      - "auto-update"
