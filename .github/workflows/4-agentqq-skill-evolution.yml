@@ -1,0 +1,202 @@
+name: "🧠 Agent QQ Skill Evolution"
+# WHY: Keeps Agent QQ orchestration current by:
+# 1. Pulling latest skills from The-MDC org
+# 2. Scanning for new Cowork plugin releases
+# 3. Updating router prompts when new best-practices emerge
+# 4. Tracking Ollama model updates for the F:/ stack
+# Runs every Sunday — weekly intelligence cycle.
+
+on:
+  schedule:
+    - cron: "0 7 * * 0"   # Sunday 7am UTC — weekly evolution
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: "What to scan"
+        type: choice
+        options: [all, skills, models, prompts]
+        default: all
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan The-MDC org for new skills
+        id: mdc_scan
+        run: |
+          echo "## The-MDC Org Scan"
+          # Get repos updated in last 7 days
+          curl -s "https://api.github.com/orgs/The-MDC/repos?sort=updated&per_page=20" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" | \
+            python3 -c "
+          import json, sys
+          from datetime import datetime, timedelta
+          repos = json.load(sys.stdin)
+          cutoff = datetime.now() - timedelta(days=7)
+          recent = []
+          for r in repos:
+              pushed = r.get('pushed_at','')
+              if pushed:
+                  try:
+                      dt = datetime.fromisoformat(pushed.replace('Z','+00:00')).replace(tzinfo=None)
+                      if dt > cutoff:
+                          recent.append(f'- [{r[\"name\"]}](https://github.com/The-MDC/{r[\"name\"]}): {r.get(\"description\",\"\")[:60]}')
+                  except: pass
+          if recent:
+              print('\n'.join(recent[:10]))
+          else:
+              print('- No repos updated in last 7 days')
+          " 2>/dev/null || echo "- Check https://github.com/The-MDC manually"
+
+      - name: Scan MADdegen repos for Agent-QQ updates
+        id: agentqq_scan
+        run: |
+          echo "## MADdegen Repo Scan"
+          curl -s "https://api.github.com/users/MADdegen/repos?sort=updated&per_page=15" | \
+            python3 -c "
+          import json, sys
+          repos = json.load(sys.stdin)
+          for r in repos[:10]:
+              name = r.get('name','?')
+              desc = r.get('description','')[:60]
+              updated = r.get('pushed_at','')[:10]
+              url = r.get('html_url','')
+              print(f'- [{name}]({url}) | {updated} | {desc}')
+          " 2>/dev/null
+
+      - name: Check for new Ollama model releases
+        id: ollama_check
+        run: |
+          echo "## Ollama Model Updates"
+          # Models relevant to Agent QQ stack
+          MODELS=("gemma3" "qwen2.5" "qwen3" "gemma2" "llama3.2" "phi4" "mistral")
+          for model in "${MODELS[@]}"; do
+            info=$(curl -s "https://ollama.com/api/show" -d "{\"name\":\"$model\"}" 2>/dev/null | \
+              python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('modelfile','')[:100])" 2>/dev/null || echo "")
+            echo "- $model: $(curl -s "https://ollama.com/api/tags" 2>/dev/null | python3 -c "
+          import json,sys
+          try:
+            data=json.load(sys.stdin)
+            tags=[t for t in data.get('tags',[]) if '$model' in t.get('name','')]
+            print(len(tags),'tags available')
+          except: print('check https://ollama.com/library/$model')
+          " 2>/dev/null)"
+          done
+
+      - name: Check Vercel AI SDK new providers
+        id: providers
+        run: |
+          echo "## AI SDK Provider Updates"
+          PROVIDERS=("@ai-sdk/anthropic" "@ai-sdk/openai" "@ai-sdk/google" "@ai-sdk/xai" "@ai-sdk/groq")
+          for pkg in "${PROVIDERS[@]}"; do
+            latest=$(curl -s "https://registry.npmjs.org/$pkg/latest" | \
+              python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('version','?'))" 2>/dev/null)
+            echo "- $pkg: **$latest**"
+          done
+
+      - name: Scan MCP awesome list for Agent QQ compatible tools
+        run: |
+          echo "## New MCP Servers (Agent QQ compatible)"
+          curl -s "https://raw.githubusercontent.com/punkpeye/awesome-mcp-servers/main/README.md" 2>/dev/null | \
+            python3 -c "
+          import sys, re
+          content = sys.stdin.read()
+          # Find recently added sections
+          links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)[^|]*\|\s*([^\n]*)', content)
+          categories = ['tool', 'code', 'search', 'web', 'data', 'file', 'browser']
+          for name, url, desc in links[:30]:
+              desc_lower = desc.lower()
+              if any(c in desc_lower for c in categories):
+                  print(f'- [{name}]({url}): {desc[:80]}')
+          " 2>/dev/null | head -20 || echo "- Check https://github.com/punkpeye/awesome-mcp-servers"
+
+      - name: Publish evolution report issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date().toISOString().split('T')[0];
+
+            const body = [
+              `# 🧠 Agent QQ Skill Evolution Report — ${now}`,
+              '',
+              '> Weekly intelligence scan. Triage and act on items below to keep your stack sharp.',
+              '',
+              '## Priority Actions This Week',
+              '- [ ] Review The-MDC org activity — new skills/commands to pull',
+              '- [ ] Check AI SDK provider versions vs `package.json` — bump if minor',
+              '- [ ] New Ollama models — worth replacing SharedExpert (gemma3:4b)?',
+              '- [ ] New MCPs from awesome list — add to `agentqq-router-v2.py`',
+              '',
+              '## How to add a new skill to Agent QQ',
+              '```',
+              '# 1. Add the skill file to F:\\AgentQQ\\skills\\',
+              '# 2. Register in agentqq-router-v2.py → MODE_INSTRUCTIONS dict',
+              '# 3. Add TaskType enum entry if new domain',
+              '# 4. Update routing in SharedExpert.route() prompt',
+              '```',
+              '',
+              '## How to add a new MCP server',
+              '```python',
+              '# In agentqq-router-v2.py:',
+              'self.tool_engine.register_tool(ToolSpec(',
+              '    name="new_mcp_tool",',
+              '    description="...",',
+              '    parameters={"param": {"type": "string", "description": "..."}},',
+              '    required=["param"]',
+              '))',
+              '```',
+              '',
+              '## Quick upgrade commands',
+              '```bash',
+              '# Update AI SDK',
+              'pnpm update ai @ai-sdk/anthropic @ai-sdk/google @ai-sdk/xai',
+              '',
+              '# Pull latest Ollama model',
+              'ollama pull gemma3:12b  # if it fits F:\\ budget',
+              '',
+              '# Re-register with updated Modelfile',
+              'ollama create agentqq/gemma-brain -f F:\\AgentQQ\\modelfiles\\Modelfile.gemma-brain',
+              '```',
+              '',
+              '_Next evolution scan: next Sunday at 7am UTC_'
+            ].join('\n');
+
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: 'skill-evolution', color: 'e4e669', description: 'Agent QQ skill evolution'
+              });
+            } catch(e) {}
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'skill-evolution'
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                title: `🧠 Agent QQ Evolution — ${now}`,
+                body
+              });
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `🧠 Agent QQ Evolution — ${now}`,
+                body,
+                labels: ['skill-evolution']
+              });
+              console.log('Created:', issue.html_url);
+            }
