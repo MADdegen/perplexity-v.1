@@ -40,6 +40,7 @@ export const serverEnv = createEnv({
     COINGECKO_API_KEY: z.string().min(1),
     QSTASH_TOKEN: z.string().min(1),
     RESEND_API_KEY: z.string().min(1),
+    PERPLEXITY_API_KEY: z.string().optional(),
     ALLOWED_ORIGINS: z.string().optional().default('http://localhost:3000'),
   },
   experimental__runtimeEnv: process.env,
