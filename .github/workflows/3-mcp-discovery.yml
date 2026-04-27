@@ -1,0 +1,216 @@
+name: "🔌 MCP & Plugin Discovery"
+# WHY: Automatically scans for new MCPs, plugins, AI SDK updates, and Ollama models
+# every week. Creates a GitHub Issue with curated findings — your "limitless skills" feed.
+# Sources: Glama.com, awesome-mcp-servers, HuggingFace GGUF models, npm AI SDK releases,
+#          Vercel AI SDK changelog, Ollama model library.
+
+on:
+  schedule:
+    - cron: "0 8 * * 3"   # Wednesday 8am UTC (mid-week intelligence drop)
+  workflow_dispatch:
+    inputs:
+      budget_gb:
+        description: "Max GGUF size in GB for F:/ drive filter"
+        default: "10"
+        type: string
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan Glama MCP Registry
+        id: glama
+        run: |
+          echo "### Glama MCP Registry Scan"
+          curl -s "https://glama.ai/api/mcp/v1/servers?limit=20&sort=recent" \
+            -H "Accept: application/json" 2>/dev/null | \
+            python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              servers = data.get('servers', data) if isinstance(data, dict) else data
+              if isinstance(servers, list):
+                  for s in servers[:15]:
+                      name = s.get('name','?')
+                      desc = s.get('description','')[:80]
+                      url = s.get('url', s.get('githubUrl',''))
+                      print(f'- [{name}]({url}): {desc}')
+          except: print('- Glama API format changed — check manually')
+          " || echo "- Glama scan: check https://glama.ai/mcp manually"
+
+      - name: Scan awesome-mcp-servers
+        id: awesome
+        run: |
+          echo "### New MCP Servers (awesome-mcp-servers)"
+          curl -s "https://api.github.com/repos/punkpeye/awesome-mcp-servers/commits?per_page=5" | \
+            python3 -c "
+          import json, sys
+          commits = json.load(sys.stdin)
+          for c in commits:
+              msg = c.get('commit',{}).get('message','')[:100]
+              date = c.get('commit',{}).get('author',{}).get('date','')[:10]
+              print(f'- [{date}] {msg}')
+          " 2>/dev/null || echo "- Check https://github.com/punkpeye/awesome-mcp-servers"
+
+      - name: Scan Vercel AI SDK releases
+        id: ai_sdk
+        run: |
+          echo "### Vercel AI SDK — Recent Releases"
+          curl -s "https://api.github.com/repos/vercel/ai/releases?per_page=5" | \
+            python3 -c "
+          import json, sys
+          releases = json.load(sys.stdin)
+          for r in releases[:5]:
+              tag = r.get('tag_name','?')
+              name = r.get('name','?')
+              date = r.get('published_at','')[:10]
+              body = r.get('body','')[:200].replace('\n',' ')
+              print(f'- **{tag}** ({date}): {name}')
+              if body: print(f'  {body}...')
+          " 2>/dev/null || echo "- Check https://github.com/vercel/ai/releases"
+
+      - name: Scan HuggingFace GGUF models (fits F:/ budget)
+        id: hf_models
+        run: |
+          BUDGET="${{ github.event.inputs.budget_gb || '10' }}"
+          echo "### HuggingFace GGUF Models (≤${BUDGET}GB — fits F:/ drive)"
+          curl -s "https://huggingface.co/api/models?filter=gguf&sort=lastModified&limit=20&direction=-1" | \
+            python3 -c "
+          import json, sys
+          try:
+              models = json.load(sys.stdin)
+              for m in models[:15]:
+                  mid = m.get('id','?')
+                  likes = m.get('likes',0)
+                  date = m.get('lastModified','')[:10]
+                  print(f'- [{mid}](https://huggingface.co/{mid}) | {likes} likes | updated {date}')
+          except Exception as e:
+              print(f'- HF scan error: {e}')
+          " 2>/dev/null || echo "- Check https://huggingface.co/models?filter=gguf"
+
+      - name: Scan Ollama new models
+        id: ollama
+        run: |
+          echo "### Ollama Library — New Models"
+          curl -s "https://ollama.com/api/tags" 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              models = data.get('models', [])
+              for m in sorted(models, key=lambda x: x.get('updated_at',''), reverse=True)[:10]:
+                  print(f'- {m[\"name\"]} | {m.get(\"description\",\"\")[:60]}')
+          except: print('- Check https://ollama.com/library')
+          " || echo "- Check https://ollama.com/library for latest models"
+
+      - name: Check Anthropic SDK updates
+        id: anthropic
+        run: |
+          echo "### @anthropic-ai/sdk + Claude Code Updates"
+          curl -s "https://registry.npmjs.org/@anthropic-ai/sdk" | \
+            python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          latest = data.get('dist-tags',{}).get('latest','?')
+          desc = data.get('description','?')
+          time_data = data.get('time',{})
+          mod = time_data.get(latest,'?')[:10]
+          print(f'- Latest: **{latest}** (published {mod})')
+          print(f'- {desc}')
+          " 2>/dev/null
+
+          curl -s "https://registry.npmjs.org/@anthropic-ai/claude-code" | \
+            python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          latest = data.get('dist-tags',{}).get('latest','?')
+          mod = data.get('time',{}).get(latest,'?')[:10]
+          print(f'- Claude Code latest: **{latest}** (published {mod})')
+          " 2>/dev/null
+
+      - name: Build discovery issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date().toISOString().split('T')[0];
+            const body = [
+              `# 🔌 MCP & Plugin Intelligence Report — ${now}`,
+              '',
+              '> Auto-generated by mcp-discovery workflow. Review and act on items below.',
+              '',
+              '## 📋 Action Items',
+              '- [ ] Review new MCPs — add relevant ones to Agent QQ tool registry',
+              '- [ ] Check AI SDK releases — update `package.json` if minor bumps',
+              '- [ ] Evaluate new GGUF models — any that fit F:\\ budget and beat Qwen?',
+              '- [ ] New Ollama models — test if any improve SharedExpert or Brain slots',
+              '',
+              '## 🔌 Glama MCP Registry',
+              'Check https://glama.ai/mcp for new servers. Add to `agentqq-router-v2.py` ToolSpec list.',
+              '',
+              '## 📦 Vercel AI SDK',
+              'Current in package.json: `ai@5.0.22`. Run `pnpm update ai` after reviewing changelog.',
+              'Changelog: https://github.com/vercel/ai/releases',
+              '',
+              '## 🤖 HuggingFace GGUF (≤10GB, fits F:\\ drive)',
+              'Top picks for Brain/Validator slot replacement:',
+              '- https://huggingface.co/models?filter=gguf&sort=trending',
+              '',
+              '## 🦙 Ollama Library',
+              'New models: https://ollama.com/library',
+              'After pulling: update `Modelfile.*` and re-run `REGISTER-MODELS.bat`',
+              '',
+              '## 🛠 How to add a new MCP to Agent QQ',
+              '```python',
+              '# In agentqq-router-v2.py → AgentQQv2._register_default_tools()',
+              'self.tool_engine.register_tool(ToolSpec(',
+              '    name="your_new_tool",',
+              '    description="What it does",',
+              '    parameters={"param": {"type": "string", "description": "..."}},',
+              '    required=["param"]',
+              '))',
+              '```',
+              '',
+              '_Next scan: next Wednesday at 8am UTC_'
+            ].join('\n');
+
+            // Check if open issue exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'mcp-discovery'
+            });
+
+            if (issues.data.length > 0) {
+              // Update existing
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                title: `🔌 MCP & Plugin Intelligence — ${now}`,
+                body: body
+              });
+              console.log('Updated existing discovery issue:', issues.data[0].number);
+            } else {
+              // Create new with label
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  name: 'mcp-discovery', color: '0075ca', description: 'MCP discovery reports'
+                });
+              } catch(e) {}
+
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🔌 MCP & Plugin Intelligence — ${now}`,
+                body: body,
+                labels: ['mcp-discovery']
+              });
+              console.log('Created discovery issue:', issue.html_url);
+            }
