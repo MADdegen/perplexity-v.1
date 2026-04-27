@@ -1,0 +1,60 @@
+name: "🔍 CI — Type Check + Lint + Build"
+# WHY: Next.js 15 + TypeScript + pnpm stack. Catches breaks before they hit prod.
+# Runs on every PR and push to main/dev branches.
+
+on:
+  push:
+    branches: [main, dev, "feature/**", "sync/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0  # matches packageManager in package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm tsc --noEmit
+        continue-on-error: false
+
+      - name: ESLint
+        run: pnpm lint
+        continue-on-error: true  # warn, don't block
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Required env stubs for build (no real keys needed for type-check build)
+          NEXT_PUBLIC_APP_URL: "https://example.com"
+          DATABASE_URL: "postgresql://user:pass@host/db"
+          ANTHROPIC_API_KEY: "sk-ant-stub"
+          OPENAI_API_KEY: "sk-stub"
+          XAI_API_KEY: "stub"
+          GROQ_API_KEY: "stub"
+          UPSTASH_REDIS_REST_URL: "https://stub.upstash.io"
+          UPSTASH_REDIS_REST_TOKEN: "stub"
+          TAVILY_API_KEY: "stub"
+          EXA_API_KEY: "stub"
+          FIRECRAWL_API_KEY: "stub"
+
+      - name: Build size report
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          du -sh .next/ 2>/dev/null || echo "Build dir not found"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
