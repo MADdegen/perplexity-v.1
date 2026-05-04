@@ -1,15 +1,54 @@
 /* eslint-disable @next/next/no-img-element */
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import { motion } from 'framer-motion';
-import { XLogo, XLogoIcon } from '@phosphor-icons/react';
-import { Tweet } from 'react-tweet';
-import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
-import { ExternalLink, Users, MessageCircle } from 'lucide-react';
+import { XLogoIcon } from '@phosphor-icons/react';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Spinner } from '@/components/ui/spinner';
+import { cn } from '@/lib/utils';
+import { CustomUIDataTypes, DataQueryCompletionPart } from '@/lib/types';
+import type { DataUIPart } from 'ai';
+
+// Dynamically import Tweet component - it's a heavy library for Twitter embeds
+const Tweet = dynamic(() => import('react-tweet').then(mod => ({ default: mod.Tweet })), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-[200px] rounded-lg border border-border bg-muted/30 animate-pulse flex items-center justify-center">
+      <Spinner className="w-4 h-4" />
+    </div>
+  ),
+});
+
+// Custom Premium Icons
+const Icons = {
+  Users: ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  ),
+  Messages: ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  ),
+  ExternalLink: ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" />
+    </svg>
+  ),
+  ChevronDown: ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  ),
+  ArrowUpRight: ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M7 17L17 7M17 7H7M17 7v10" />
+    </svg>
+  ),
+};
 
 interface Citation {
   url: string;
@@ -26,7 +65,7 @@ interface Source {
   title?: string;
 }
 
-interface XSearchResponse {
+interface XSearchQueryResult {
   content: string;
   citations: Citation[];
   sources: Source[];
@@ -35,73 +74,191 @@ interface XSearchResponse {
   handles: string[];
 }
 
+interface XSearchResponse {
+  searches: XSearchQueryResult[];
+  dateRange: string;
+  handles: string[];
+}
+
 interface XSearchArgs {
-  query: string;
-  startDate: string;
-  endDate: string;
-  xHandles?: string[];
-  maxResults?: number;
+  queries?: (string | undefined)[] | string | null;
+  startDate?: string;
+  endDate?: string;
+  includeXHandles?: string[];
+  excludeXHandles?: string[];
+  postFavoritesCount?: number;
+  postViewCount?: number;
+  maxResults?: (number | undefined)[] | number | null;
+}
+
+interface NormalizedXSearchArgs {
+  queries: string[];
+  maxResults: number[];
 }
 
 interface XSearchProps {
-  result: XSearchResponse;
+  result: XSearchResponse | null;
   args: XSearchArgs;
+  annotations?: DataQueryCompletionPart[];
 }
 
-const XSearchLoadingState = () => {
+function extractTweetId(url?: string | null) {
+  if (!url) return null;
+  return url.match(/\/status\/(\d+)/)?.[1] ?? null;
+}
+
+const XSearchLoadingState: React.FC<{ queries: string[]; annotations: DataUIPart<CustomUIDataTypes>[] }> = React.memo(({ queries, annotations }) => {
+  const [isExpanded, setIsExpanded] = useState(true);
+  const loadingQueryTagsRef = React.useRef<HTMLDivElement>(null);
+  const totalSources = useMemo(
+    () => annotations.reduce((sum, a) => sum + (a.data.resultsCount || 0), 0),
+    [annotations]
+  );
+
+  const handleWheelScroll = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    if (e.deltaY === 0) return;
+    const canScrollHorizontally = container.scrollWidth > container.clientWidth;
+    if (!canScrollHorizontally) return;
+    e.stopPropagation();
+    const isAtLeftEdge = container.scrollLeft <= 1;
+    const isAtRightEdge = container.scrollLeft >= container.scrollWidth - container.clientWidth - 1;
+    if (!isAtLeftEdge && !isAtRightEdge) {
+      e.preventDefault();
+      container.scrollLeft += e.deltaY;
+    } else if (isAtLeftEdge && e.deltaY > 0) {
+      e.preventDefault();
+      container.scrollLeft += e.deltaY;
+    } else if (isAtRightEdge && e.deltaY < 0) {
+      e.preventDefault();
+      container.scrollLeft += e.deltaY;
+    }
+  }, []);
+
   return (
-    <Card className="w-full my-4 border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-neutral-50 dark:bg-neutral-800 animate-pulse">
-            <XLogoIcon className="h-4 w-4 text-neutral-400" />
+    <div className="w-full my-3">
+      <div className="rounded-xl border border-border/60 overflow-hidden bg-card/30">
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-muted/20 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <div className="p-1 rounded bg-background/80 shrink-0">
+              <XLogoIcon className="h-2.5 w-2.5 text-foreground" />
+            </div>
+            <span className="font-pixel text-xs text-muted-foreground/80 uppercase tracking-wider">X Search</span>
           </div>
-          <div className="space-y-2 flex-1">
-            <div className="h-4 w-32 bg-neutral-200 dark:bg-neutral-700 rounded animate-pulse" />
-            <div className="h-3 w-48 bg-neutral-100 dark:bg-neutral-800 rounded animate-pulse" />
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground/60 tabular-nums">{totalSources || 0}</span>
+            <Icons.ChevronDown
+              className={cn(
+                'h-3 w-3 text-muted-foreground/60 transition-transform duration-200',
+                isExpanded && 'rotate-180',
+              )}
+            />
           </div>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {[...Array(3)].map((_, i) => (
-          <div key={i} className="p-4 border border-neutral-200 dark:border-neutral-800 rounded-lg animate-pulse">
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <div className="h-8 w-8 bg-neutral-200 dark:bg-neutral-700 rounded-full" />
-                <div className="h-4 w-24 bg-neutral-200 dark:bg-neutral-700 rounded" />
-              </div>
-              <div className="space-y-2">
-                <div className="h-3 w-full bg-neutral-100 dark:bg-neutral-800 rounded" />
-                <div className="h-3 w-3/4 bg-neutral-100 dark:bg-neutral-800 rounded" />
-              </div>
+        </button>
+
+        {isExpanded && (
+          <div className="border-t border-border/40">
+            <div
+              ref={loadingQueryTagsRef}
+              className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-border/30"
+              onWheel={handleWheelScroll}
+            >
+              {queries.length ? (
+                queries.map((query, i) => {
+                  const isCompleted = annotations.some((a) => a.data.query === query && a.data.status === 'completed');
+                  const annotation = annotations.find((a) => a.data.query === query);
+                  const sourcesCount = annotation?.data.resultsCount || 0;
+                  return (
+                    <span key={i} className="inline-flex items-center gap-1.5 text-[10px] shrink-0">
+                      {isCompleted ? (
+                        <svg className="w-2.5 h-2.5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M20 6L9 17l-5-5" />
+                        </svg>
+                      ) : (
+                        <Spinner className="w-2.5 h-2.5" />
+                      )}
+                      <span className={cn('font-medium', isCompleted ? 'text-foreground' : 'text-muted-foreground')}>{query}</span>
+                      {sourcesCount > 0 && <span className="text-[9px] text-muted-foreground/50 tabular-nums">({sourcesCount})</span>}
+                      {i < queries.length - 1 && <span className="text-muted-foreground/30 ml-1">/</span>}
+                    </span>
+                  );
+                })
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <Spinner className="w-2.5 h-2.5" />
+                  <span className="font-medium">Searching X...</span>
+                </span>
+              )}
+            </div>
+
+            <div className="divide-y divide-border/20">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="px-3.5 py-2 flex items-center gap-2.5">
+                  <div className="w-3.5 h-3.5 rounded-sm bg-muted/30 animate-pulse shrink-0" style={{ animationDelay: `${i * 100}ms` }} />
+                  <div className="flex-1 space-y-1">
+                    <div className="h-3 bg-muted/30 rounded animate-pulse w-3/4" style={{ animationDelay: `${i * 100 + 50}ms` }} />
+                    <div className="h-2 bg-muted/20 rounded animate-pulse w-1/2" style={{ animationDelay: `${i * 100 + 80}ms` }} />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        ))}
-      </CardContent>
-    </Card>
+        )}
+      </div>
+    </div>
   );
-};
+});
 
-const XSearch: React.FC<XSearchProps> = ({ result, args }) => {
+XSearchLoadingState.displayName = 'XSearchLoadingState';
+
+const XSearch: React.FC<XSearchProps> = ({ result, args, annotations = [] }) => {
   const [isSheetOpen, setIsSheetOpen] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const normalizedQueries = useMemo(() => {
+    const raw = Array.isArray(args?.queries) ? args.queries : [args?.queries ?? ''];
+    return raw.filter((q): q is string => typeof q === 'string' && q.length > 0);
+  }, [args?.queries]);
+
+  const searches = useMemo(() => {
+    const raw = result?.searches;
+    return Array.isArray(raw) ? raw : [];
+  }, [result?.searches]);
+
+  // Aggregate all citations and sources from all searches
+  const allCitations = useMemo(() => searches.flatMap((search) => search.citations ?? []), [searches]);
+  const allSources = useMemo(() => searches.flatMap((search) => search.sources ?? []), [searches]);
+  const uniqueSources = useMemo(() => {
+    const seen = new Set<string>();
+    return allSources.filter((source) => {
+      const key = extractTweetId(source.link) ?? source.link ?? source.text;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [allSources]);
 
   // Extract tweet IDs from citations
   const tweetCitations = useMemo(() => {
-    return result.citations
+    const seen = new Set<string>();
+    return allCitations
       .filter((citation) => {
-        // Handle both string URLs and objects with url property
         const url = typeof citation === 'string' ? citation : citation.url;
         return url && url.includes('x.com');
       })
       .map((citation) => {
-        // Handle both string URLs and objects with url property
         const url = typeof citation === 'string' ? citation : citation.url;
-        const match = url.match(/\/status\/(\d+)/);
+        const tweetId = extractTweetId(url);
         let title = typeof citation === 'object' ? citation.title : '';
 
-        // If no title from citation, try to get it from sources with generated titles
-        if (!title && result.sources) {
-          const matchingSource = result.sources.find((source) => source.link === url);
+        if (!title && uniqueSources.length) {
+          const matchingSource = uniqueSources.find((source) => {
+            const sourceId = extractTweetId(source.link);
+            return sourceId && sourceId === tweetId;
+          });
           title = matchingSource?.title || '';
         }
 
@@ -109,11 +266,18 @@ const XSearch: React.FC<XSearchProps> = ({ result, args }) => {
           url,
           title,
           description: typeof citation === 'object' ? citation.description : '',
-          tweet_id: match ? match[1] : null,
+          tweet_id: tweetId,
         };
       })
-      .filter((citation) => citation.tweet_id);
-  }, [result.citations]);
+      .filter((citation) => {
+        if (!citation.tweet_id) return false;
+        if (seen.has(citation.tweet_id)) {
+          return false;
+        }
+        seen.add(citation.tweet_id);
+        return true;
+      });
+  }, [allCitations, uniqueSources]);
 
   const displayedTweets = useMemo(() => {
     return tweetCitations.slice(0, 3);
@@ -123,201 +287,201 @@ const XSearch: React.FC<XSearchProps> = ({ result, args }) => {
     return tweetCitations.slice(3);
   }, [tweetCitations]);
 
-  if (!result) {
-    return <XSearchLoadingState />;
-  }
+  const formatDateRange = (dateRange?: string) => {
+    if (!dateRange) {
+      return { start: 'Unknown', end: 'Unknown' };
+    }
 
-  const formatDateRange = (dateRange: string) => {
-    const [start, end] = dateRange.split(' to ');
+    const [startRaw = '', endRaw = ''] = dateRange.split(' to ');
+
+    const toDisplayDate = (value: string) => {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? 'Unknown'
+        : date.toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+          });
+    };
+
     return {
-      start: new Date(start).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-      }),
-      end: new Date(end).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-      }),
+      start: toDisplayDate(startRaw),
+      end: toDisplayDate(endRaw),
     };
   };
 
-  const { start, end } = formatDateRange(result.dateRange);
+  const { start, end } = formatDateRange(result?.dateRange);
+
+  if (!result) {
+    return <XSearchLoadingState queries={normalizedQueries} annotations={annotations} />;
+  }
 
   return (
-    <div className="w-full my-3">
-      <Accordion
-        type="single"
-        collapsible
-        defaultValue="x_search"
-        className="w-full border border-neutral-200 dark:border-neutral-800 rounded-xl bg-white dark:bg-neutral-900 shadow-sm"
-      >
-        <AccordionItem value="x_search">
-          <AccordionTrigger className="px-3 py-2.75 hover:no-underline [&[data-state=open]]:border-b [&[data-state=open]]:border-neutral-200 [&[data-state=open]]:dark:border-neutral-800 w-full [&>svg]:flex [&>svg]:items-center [&>svg]:justify-center [&>svg]:self-center">
-            <div className="flex items-center justify-between flex-1 min-w-0">
-              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                <div className="p-1.5 rounded-md bg-black dark:bg-white flex-shrink-0">
-                  <XLogo className="h-3.5 w-3.5 text-white dark:text-black" />
-                </div>
-                <div className="text-left min-w-0 flex-1">
-                  <h3 className="font-medium text-sm">X Search Results</h3>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
-                    {result.query} • {start} - {end}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
-                {result.handles.length > 0 && (
-                  <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-xs hidden sm:flex">
-                    <Users className="h-2.5 w-2.5 mr-1" />
-                    {result.handles.length}
-                  </Badge>
-                )}
-                <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-xs">
-                  <MessageCircle className="h-2.5 w-2.5 mr-1" />
-                  {tweetCitations.length}
-                </Badge>
-              </div>
+    <div className="w-full my-2">
+      <div className="rounded-lg border border-border/60 overflow-hidden bg-card/30">
+        {/* Header */}
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="w-full px-2 py-2 flex items-center justify-between hover:bg-muted/20 transition-colors group"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1 rounded bg-background/80 shrink-0">
+              <XLogoIcon className="size-5 text-foreground" />
             </div>
-          </AccordionTrigger>
+            <div className="flex flex-col items-start gap-0.5 min-w-0">
+              <span className="font-pixel text-xs text-muted-foreground/80 uppercase tracking-wider">X Search</span>
+              <span className="text-[8.5px] text-muted-foreground/60 truncate">
+                {tweetCitations.length} posts {start !== 'Unknown' ? `· ${start} - ${end}` : ''}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {searches.length > 1 && (
+              <span className="hidden sm:inline text-[9px] text-muted-foreground/50 tabular-nums">
+                {searches.length} queries
+              </span>
+            )}
+            <Icons.ChevronDown
+              className={cn(
+                'h-3 w-3 text-muted-foreground/60 transition-transform duration-200 group-hover:text-muted-foreground',
+                isExpanded && 'rotate-180',
+              )}
+            />
+          </div>
+        </button>
 
-          <AccordionContent className="px-2 sm:px-3 pt-3 mb-0 pb-0">
-            <div className="space-y-3">
-              {/* Horizontal Tweets Row */}
-              {tweetCitations.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex gap-3 sm:gap-4 overflow-x-auto scrollbar-none">
-                    {displayedTweets.map((citation, index) => (
-                      <motion.div
-                        key={citation.tweet_id}
-                        initial={{ opacity: 0, scale: 0.95 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ delay: index * 0.05 }}
-                        className="flex-shrink-0 w-[280px] sm:w-[320px] md:w-[350px]"
+        {/* Content */}
+        {isExpanded && (
+          <div className="border-t border-border/40">
+            {/* Query tags */}
+            {searches.length > 0 && (
+              <div className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-b border-border/30">
+                {searches.map((search, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 text-[10px] shrink-0">
+                    <span className="font-medium text-foreground/80">{search.query}</span>
+                    {i < searches.length - 1 && <span className="text-muted-foreground/30 ml-1">/</span>}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Tweets Grid - more compact and browsable */}
+            {tweetCitations.length > 0 && (
+              <div className="px-2.5 pt-1.5">
+                <div className="flex gap-2.5 overflow-x-auto no-scrollbar">
+                  {displayedTweets.map((citation, index) => (
+                    <motion.div
+                      key={citation.tweet_id}
+                      initial={{ opacity: 0, scale: 0.96 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: index * 0.03 }}
+                      className="shrink-0 w-[260px] sm:w-[300px]"
+                    >
+                      {citation.tweet_id && (
+                        <div className="tweet-wrapper">
+                          <Tweet id={citation.tweet_id} />
+                        </div>
+                      )}
+                    </motion.div>
+                  ))}
+
+                  {/* More button - cleaner design */}
+                  {remainingTweets.length > 0 && (
+                    <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
+                      <button
+                        onClick={() => setIsSheetOpen(true)}
+                        className="shrink-0 w-[260px] sm:w-[300px] min-h-[160px] border border-dashed border-border/60 dark:border-2 dark:border-solid dark:border-border rounded-lg flex flex-col items-center justify-center hover:border-border dark:hover:border-border hover:bg-accent/20 transition-colors group"
                       >
-                        {citation.tweet_id && (
-                          <div className="tweet-wrapper">
-                            <Tweet id={citation.tweet_id} />
-                          </div>
-                        )}
-                      </motion.div>
-                    ))}
-
-                    {/* Show More in Sheet */}
-                    {remainingTweets.length > 0 && (
-                      <Sheet open={isSheetOpen} onOpenChange={setIsSheetOpen}>
-                        <SheetTrigger asChild>
-                          <div className="flex-shrink-0 w-[280px] sm:w-[320px] md:w-[350px] min-h-[180px] border-2 border-dashed border-neutral-200 dark:border-neutral-700 rounded-2xl flex flex-col items-center justify-center cursor-pointer hover:border-neutral-300 dark:hover:border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-800/30 transition-all duration-200 group">
-                            <div className="text-center px-4">
-                              <div className="mb-2">
-                                <div className="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mx-auto mb-2 group-hover:scale-105 transition-transform">
-                                  <MessageCircle className="h-4 w-4 text-neutral-500" />
-                                </div>
+                        <div className="p-2 rounded-full bg-muted/50 mb-2 group-hover:bg-muted transition-colors">
+                          <Icons.Messages className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                        <p className="font-medium text-xs text-foreground">+{remainingTweets.length} more</p>
+                        <p className="text-[10px] text-muted-foreground/70 mt-0.5">View all posts</p>
+                      </button>
+                      <SheetContent side="right" className="w-full sm:w-[480px] md:w-[550px] sm:max-w-[90vw] p-0">
+                        <div className="flex flex-col h-full bg-background">
+                          <SheetHeader className="px-4 py-3 border-b border-border/40">
+                            <SheetTitle className="flex items-center gap-2 text-sm">
+                              <div className="p-1 rounded bg-background/80">
+                                <XLogoIcon className="h-3 w-3 text-foreground" />
                               </div>
-                              <p className="font-medium text-sm text-neutral-700 dark:text-neutral-300 mb-1">
-                                +{remainingTweets.length} more posts
-                              </p>
-                              <p className="text-xs text-neutral-500 dark:text-neutral-500">Click to view all</p>
+                              <span>All Posts ({tweetCitations.length})</span>
+                            </SheetTitle>
+                          </SheetHeader>
+                          <div className="flex-1 overflow-y-auto p-3">
+                            <div className="space-y-4 max-w-full sm:max-w-[520px] mx-auto">
+                              {tweetCitations.map((citation, index) => (
+                                <motion.div
+                                  key={citation.tweet_id}
+                                  initial={{ opacity: 0, y: 10 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  transition={{ delay: index * 0.015 }}
+                                >
+                                  {citation.tweet_id && (
+                                    <div className="tweet-wrapper-sheet">
+                                      <Tweet id={citation.tweet_id} />
+                                    </div>
+                                  )}
+                                </motion.div>
+                              ))}
                             </div>
                           </div>
-                        </SheetTrigger>
-                        <SheetContent
-                          side="right"
-                          className="w-full sm:w-[500px] md:w-[600px] lg:w-[650px] sm:max-w-[90vw] p-0"
+                        </div>
+                      </SheetContent>
+                    </Sheet>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* No tweets state - more minimal */}
+            {tweetCitations.length === 0 && (
+              <div className="text-center py-8 px-4">
+                <div className="inline-flex p-2 rounded-full bg-muted/50 mb-2">
+                  <Icons.Messages className="h-4 w-4 text-muted-foreground/60" />
+                </div>
+                <p className="text-xs text-muted-foreground/80">No posts found for this search</p>
+              </div>
+            )}
+
+            {/* External links - cleaner and more compact */}
+            {/* {allCitations.length > tweetCitations.length && (
+              <div className="border-t border-border/40 px-2.5 py-2">
+                <h4 className="text-[10px] font-medium text-muted-foreground/70 uppercase tracking-wider mb-1.5">
+                  Sources
+                </h4>
+                <div className="space-y-0.5">
+                  {allCitations
+                    .filter((citation) => {
+                      const url = typeof citation === 'string' ? citation : citation.url;
+                      return url && !url.includes('x.com');
+                    })
+                    .slice(0, 3)
+                    .map((citation, index) => {
+                      const url = typeof citation === 'string' ? citation : citation.url;
+                      const title = typeof citation === 'object' ? citation.title : url;
+                      return (
+                        <a
+                          key={index}
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 py-1.5 px-2 rounded hover:bg-accent/20 transition-colors group"
                         >
-                          <div className="flex flex-col h-full">
-                            <SheetHeader className="px-4 sm:px-6 py-4 border-b border-neutral-200 dark:border-neutral-800">
-                              <SheetTitle className="flex items-center gap-2.5">
-                                <div className="p-1.5 rounded-md bg-black dark:bg-white">
-                                  <XLogo className="h-3.5 w-3.5 text-white dark:text-black" />
-                                </div>
-                                <span>All Posts ({tweetCitations.length})</span>
-                              </SheetTitle>
-                            </SheetHeader>
-                            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-                              <div className="space-y-6 max-w-full sm:max-w-[550px] mx-auto">
-                                {tweetCitations.map((citation, index) => (
-                                  <motion.div
-                                    key={citation.tweet_id}
-                                    initial={{ opacity: 0, y: 20 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    transition={{ delay: index * 0.02 }}
-                                  >
-                                    {citation.tweet_id && (
-                                      <div className="tweet-wrapper-sheet">
-                                        <Tweet id={citation.tweet_id} />
-                                      </div>
-                                    )}
-                                  </motion.div>
-                                ))}
-                              </div>
-                            </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[11px] text-foreground/90 truncate leading-tight">{title}</p>
                           </div>
-                        </SheetContent>
-                      </Sheet>
-                    )}
-                  </div>
+                          <Icons.ArrowUpRight className="h-2.5 w-2.5 text-muted-foreground/50 group-hover:text-muted-foreground shrink-0 transition-colors" />
+                        </a>
+                      );
+                    })}
                 </div>
-              )}
-
-              {/* Compact No Tweets Found */}
-              {tweetCitations.length === 0 && (
-                <div className="text-center py-6">
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="p-2 rounded-full bg-neutral-100 dark:bg-neutral-800">
-                      <MessageCircle className="h-4 w-4 text-neutral-500" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium text-neutral-900 dark:text-neutral-100 text-sm">No posts found</h4>
-                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
-                        Try adjusting your search parameters
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Compact External Links */}
-              {result.citations.length > tweetCitations.length && (
-                <div className="border-t border-neutral-200 dark:border-neutral-800 pt-3 mt-3">
-                  <h4 className="font-medium text-xs text-neutral-700 dark:text-neutral-300 mb-2 uppercase tracking-wide">
-                    Related Sources
-                  </h4>
-                  <div className="space-y-1">
-                    {result.citations
-                      .filter((citation) => {
-                        const url = typeof citation === 'string' ? citation : citation.url;
-                        return url && !url.includes('x.com');
-                      })
-                      .slice(0, 3)
-                      .map((citation, index) => {
-                        const url = typeof citation === 'string' ? citation : citation.url;
-                        const title = typeof citation === 'object' ? citation.title : url;
-                        return (
-                          <a
-                            key={index}
-                            href={url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-2 p-1.5 rounded-md hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors group"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-xs text-neutral-900 dark:text-neutral-100 truncate group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                                {title}
-                              </p>
-                            </div>
-                            <ExternalLink className="h-3 w-3 text-neutral-400 group-hover:text-blue-500 flex-shrink-0" />
-                          </a>
-                        );
-                      })}
-                  </div>
-                </div>
-              )}
-            </div>
-          </AccordionContent>
-        </AccordionItem>
-      </Accordion>
+              </div>
+            )} */}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

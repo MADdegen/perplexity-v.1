@@ -1,481 +1,512 @@
-import { wrapLanguageModel, customProvider, extractReasoningMiddleware } from 'ai';
+import 'server-only';
+import { wrapLanguageModel, customProvider, extractReasoningMiddleware, gateway } from 'ai';
 
-import { openai, createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createWebSocketFetch } from 'ai-sdk-openai-websocket-fetch';
 import { xai } from '@ai-sdk/xai';
 import { groq } from '@ai-sdk/groq';
-import { anthropic } from '@ai-sdk/anthropic';
-import { google } from '@ai-sdk/google';
 import { mistral } from '@ai-sdk/mistral';
+import { google } from '@ai-sdk/google';
+import { baseten } from '@ai-sdk/baseten';
+import { anthropic } from '@ai-sdk/anthropic';
+import { cohere } from '@ai-sdk/cohere';
+import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+import { createRetryable } from 'ai-retry';
+import { createWorkersAI } from 'workers-ai-provider';
+
+const ark = createOpenAICompatible({
+  name: 'ark',
+  baseURL: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+  apiKey: process.env.ARK_API_KEY,
+});
+
+const sarvam = createOpenAICompatible({
+  name: 'sarvam',
+  baseURL: 'https://api.sarvam.ai/v1',
+  apiKey: process.env.SARVAM_API_KEY,
+});
+
+const zai = createOpenAICompatible({
+  name: 'zai',
+  baseURL: 'https://api.z.ai/api/paas/v4',
+  apiKey: process.env.ZAI_API_KEY,
+});
 
 const middleware = extractReasoningMiddleware({
   tagName: 'think',
 });
 
-const huggingface = createOpenAI({
+const middlewareWithStartWithReasoning = extractReasoningMiddleware({
+  tagName: 'think',
+  startWithReasoning: true,
+});
+
+const huggingface = createOpenAICompatible({
+  name: 'huggingface',
   baseURL: 'https://router.huggingface.co/v1',
   apiKey: process.env.HF_TOKEN,
 });
 
+const novita = createOpenAICompatible({
+  name: 'novita',
+  baseURL: 'https://api.novita.ai/openai',
+  apiKey: process.env.NOVITA_API_KEY,
+});
+
+const workersai = createWorkersAI({
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID!,
+  apiKey: process.env.CLOUDFLARE_API_TOKEN!,
+});
+
+const openrouter = createOpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  headers: {
+    'HTTP-Referer': 'https://sciraai.in',
+    'X-Title': 'Scira AI',
+    'Content-Type': 'application/json',
+  },
+});
+
+const minimax = createOpenAICompatible({
+  name: 'minimax',
+  baseURL: 'https://api.minimax.io/v1',
+  apiKey: process.env.MINIMAX_API_KEY,
+});
+
+const wsFetch = createWebSocketFetch();
+const openai = createOpenAI({
+  fetch: wsFetch,
+});
+
+const openai_2 = createOpenAI({
+  apiKey: process.env.OPENAI_API_KEY_2,
+  fetch: wsFetch,
+});
+
 export const scira = customProvider({
   languageModels: {
-    'scira-default': xai('grok-3-mini'),
+    'scira-arch-router': huggingface.chatModel('katanemo/Arch-Router-1.5B:hf-inference'),
+    'scira-default': xai('grok-4-1-fast-non-reasoning'),
+    'scira-auto': xai('grok-4-1-fast-non-reasoning'),
+    'scira-sarvam-105b': sarvam.chatModel('sarvam-105b'),
+    'scira-grok4.1-fast-thinking': xai('grok-4-1-fast-reasoning'),
+    'scira-ext-1': createRetryable({
+      model: xai('grok-4-1-fast-reasoning'),
+      retries: [gateway('xai/grok-4.1-fast-reasoning')],
+    }),
+    'scira-ext-2': createRetryable({
+      model: openai('gpt-5.4'),
+      retries: [openai_2('gpt-5.4')],
+    }),
+    // 'scira-ext-3': gateway('anthropic/claude-sonnet-4.6'),
+    'scira-ext-4': createRetryable({
+      model: workersai('@cf/zai-org/glm-4.7-flash'),
+      retries: [novita.chatModel('zai-org/glm-4.7-flash')],
+    }),
+    'scira-ext-5': gateway('moonshotai/kimi-k2.5'),
+    'scira-ext-6': createRetryable({
+      model: google('gemini-3.1-pro-preview'),
+      retries: [gateway('google/gemini-3.1-pro-preview')],
+    }),
+    'scira-ext-7': gateway('alibaba/qwen3.5-flash'),
+    'scira-ext-8': xai('grok-4.20-experimental-beta-0304-non-reasoning'),
     'scira-nano': groq('llama-3.3-70b-versatile'),
-    'scira-grok-3': xai('grok-3-fast'),
+    'scira-name': createRetryable({
+      model: gateway('google/gemini-2.5-flash-lite-preview-09-2025'),
+      retries: [google('gemini-2.5-flash-lite-preview-09-2025'), google('gemini-2.5-flash-lite')],
+    }),
+    'scira-grok-3-mini': xai('grok-3-mini'),
+    'scira-grok-3': xai('grok-3'),
     'scira-grok-4': xai('grok-4'),
-    'scira-enhance': groq('moonshotai/kimi-k2-instruct'),
-    'scira-gpt-oss-120': wrapLanguageModel({
-      model: groq('openai/gpt-oss-120b'),
+    'scira-grok-4.20-experimental-beta-0304': xai('grok-4.20-non-reasoning-latest'),
+    'scira-grok-4.20-experimental-beta-0304-thinking': xai('grok-4.20-reasoning-latest'),
+    'scira-grok-4-fast': xai('grok-4-fast-non-reasoning'),
+    'scira-grok-4-fast-think': xai('grok-4-fast-reasoning'),
+    'scira-code': xai('grok-code-fast-1'),
+    'scira-enhance': groq('moonshotai/kimi-k2-instruct-0905'),
+    'scira-follow-up': createRetryable({
+      model: google('gemini-2.5-flash-lite-preview-09-2025'),
+      retries: [
+        google('gemini-2.5-flash-lite'),
+        gateway('google/gemini-2.5-flash-lite'),
+        gateway('google/gemini-2.5-flash-lite-preview-09-2025'),
+      ],
+    }),
+    'scira-qwen-4b': huggingface.chatModel('Qwen/Qwen3-4B-Instruct-2507:nscale'),
+    'scira-qwen-4b-thinking': wrapLanguageModel({
+      model: huggingface.chatModel('Qwen/Qwen3-4B-Thinking-2507:nscale'),
+      middleware: [middlewareWithStartWithReasoning],
+    }),
+    'scira-gpt-4.1-nano': createRetryable({
+      model: openai('gpt-4.1-nano'),
+      retries: [openai_2('gpt-4.1-nano')],
+    }),
+    'scira-gpt-4.1-mini': createRetryable({
+      model: openai('gpt-4.1-mini'),
+      retries: [openai_2('gpt-4.1-mini')],
+    }),
+    'scira-gpt-4.1': createRetryable({
+      model: openai('gpt-4.1'),
+      retries: [openai_2('gpt-4.1')],
+    }),
+    'scira-gpt-5.1': createRetryable({
+      model: openai('gpt-5.1'),
+      retries: [openai_2('gpt-5.1')],
+    }),
+    'scira-gpt-5.1-thinking': createRetryable({
+      model: openai('gpt-5.1'),
+      retries: [openai_2('gpt-5.1')],
+    }),
+    'scira-gpt-5.2': createRetryable({
+      model: openai('gpt-5.2'),
+      retries: [openai_2('gpt-5.2')],
+    }),
+    'scira-gpt-5.3-chat-latest': createRetryable({
+      model: openai('gpt-5.3-chat-latest'),
+      retries: [openai_2('gpt-5.3-chat-latest')],
+    }),
+    'scira-gpt-5.4': createRetryable({
+      model: openai('gpt-5.4'),
+      retries: [openai_2('gpt-5.4')],
+    }),
+    'scira-gpt-5.4-mini': createRetryable({
+      model: openai('gpt-5.4-mini'),
+      retries: [openai_2('gpt-5.4-mini')],
+    }),
+    'scira-gpt-5.4-nano': createRetryable({
+      model: openai('gpt-5.4-nano'),
+      retries: [openai_2('gpt-5.4-nano')],
+    }),
+    'scira-gpt-5.4-thinking': createRetryable({
+      model: openai('gpt-5.4'),
+      retries: [openai_2('gpt-5.4')],
+    }),
+    'scira-gpt-5.4-thinking-xhigh': createRetryable({
+      model: openai('gpt-5.4'),
+      retries: [openai_2('gpt-5.4')],
+    }),
+    'scira-gpt-5.2-thinking': createRetryable({
+      model: openai('gpt-5.2'),
+      retries: [openai_2('gpt-5.2')],
+    }),
+    'scira-gpt-5.2-thinking-xhigh': createRetryable({
+      model: openai('gpt-5.2'),
+      retries: [openai_2('gpt-5.2')],
+    }),
+    'scira-gpt-5.1-codex': createRetryable({
+      model: openai('gpt-5.1-codex'),
+      retries: [openai_2('gpt-5.1-codex')],
+    }),
+    'scira-gpt-5.1-codex-mini': createRetryable({
+      model: openai('gpt-5.1-codex-mini'),
+      retries: [openai_2('gpt-5.1-codex-mini')],
+    }),
+    'scira-gpt-5.1-codex-max': createRetryable({
+      model: openai('gpt-5.1-codex-max'),
+      retries: [openai_2('gpt-5.1-codex-max')],
+    }),
+    'scira-gpt-5.2-codex': createRetryable({
+      model: openai('gpt-5.2-codex'),
+      retries: [openai_2('gpt-5.2-codex')],
+    }),
+    'scira-gpt-5.3-codex': createRetryable({
+      model: openai('gpt-5.3-codex'),
+      retries: [openai_2('gpt-5.3-codex')],
+    }),
+    'scira-gpt5': createRetryable({
+      model: openai('gpt-5'),
+      retries: [openai_2('gpt-5')],
+    }),
+    'scira-gpt5-medium': createRetryable({
+      model: openai('gpt-5'),
+      retries: [openai_2('gpt-5')],
+    }),
+    'scira-gpt5-mini': createRetryable({
+      model: openai('gpt-5-mini'),
+      retries: [openai_2('gpt-5-mini')],
+    }),
+    'scira-gpt5-nano': createRetryable({
+      model: openai('gpt-5-nano'),
+      retries: [openai_2('gpt-5-nano')],
+    }),
+    'scira-o3': createRetryable({
+      model: openai('o3'),
+      retries: [openai_2('o3')],
+    }),
+    'scira-o4-mini': createRetryable({
+      model: openai('o4-mini'),
+      retries: [openai_2('o4-mini')],
+    }),
+    'scira-gpt5-codex': createRetryable({
+      model: openai('gpt-5-codex'),
+      retries: [openai_2('gpt-5-codex')],
+    }),
+    'scira-qwen-32b': wrapLanguageModel({
+      model: groq('qwen/qwen3-32b'),
+      middleware,
+    }),
+    'scira-qwen-32b-thinking': wrapLanguageModel({
+      model: groq('qwen/qwen3-32b'),
       middleware,
     }),
     'scira-gpt-oss-20': wrapLanguageModel({
       model: groq('openai/gpt-oss-20b'),
       middleware,
     }),
-    'scira-5-nano': openai.responses('gpt-5-nano'),
-    'scira-5-mini': openai.responses('gpt-5-mini'),
-    'scira-5': openai.responses('gpt-5'),
-    'scira-5-high': openai.responses('gpt-5'),
-    'scira-qwen-32b': wrapLanguageModel({
-      model: groq('qwen/qwen3-32b'),
+    'scira-nemotron-3-super': workersai('@cf/nvidia/nemotron-3-120b-a12b'),
+    'scira-gpt-oss-120': wrapLanguageModel({
+      model: baseten('openai/gpt-oss-120b'),
       middleware,
     }),
-    'scira-qwen-coder': huggingface.chat('Qwen/Qwen3-Coder-480B-A35B-Instruct:cerebras'),
-    'scira-deepseek-v3': wrapLanguageModel({
-      model: huggingface.chat('deepseek-ai/DeepSeek-V3.1:fireworks-ai'),
+    'scira-trinity-mini': wrapLanguageModel({
+      model: gateway('arcee-ai/trinity-mini'),
       middleware,
     }),
+    'scira-trinity-large': wrapLanguageModel({
+      model: openrouter('arcee-ai/trinity-large-preview:free'),
+      middleware,
+    }),
+    'scira-step-3.5-flash': openrouter('stepfun/step-3.5-flash:free'),
+    'scira-kat-coder': gateway('kwaipilot/kat-coder-pro-v1'),
+    'scira-deepseek-v3': baseten('deepseek-ai/DeepSeek-V3-0324'),
+    'scira-deepseek-v3.1-terminus': gateway('deepseek/deepseek-v3.1-terminus'),
+    'scira-deepseek-chat': gateway('deepseek/deepseek-v3.2'),
+    'scira-deepseek-chat-think': gateway('deepseek/deepseek-v3.2-thinking'),
+    'scira-deepseek-chat-exp': gateway('deepseek/deepseek-v3.2-exp'),
+    'scira-deepseek-chat-think-exp': wrapLanguageModel({
+      model: novita.chatModel('deepseek/deepseek-v3.2-exp'),
+      middleware,
+    }),
+    'scira-v0-10': gateway('vercel/v0-1.0-md'),
+    'scira-v0-15': gateway('vercel/v0-1.5-md'),
+    'scira-deepseek-r1': wrapLanguageModel({
+      model: novita.chatModel('deepseek/deepseek-r1-turbo'),
+      middleware,
+    }),
+    'scira-deepseek-r1-0528': wrapLanguageModel({
+      model: novita.chatModel('deepseek/deepseek-r1-0528'),
+      middleware,
+    }),
+    'scira-qwen-coder-small': gateway('alibaba/qwen3-coder-30b-a3b'),
+    'scira-qwen-coder': baseten('Qwen/Qwen3-Coder-480B-A35B-Instruct'),
+    'scira-qwen-coder-plus': gateway('alibaba/qwen3-coder-plus'),
+    'scira-qwen-coder-next': novita.chatModel('qwen/qwen3-coder-next'),
+    'scira-qwen-30': huggingface.chatModel('Qwen/Qwen3-30B-A3B-Instruct-2507:nebius'),
+    'scira-qwen-30-think': wrapLanguageModel({
+      model: huggingface.chatModel('Qwen/Qwen3-30B-A3B-Thinking-2507:nebius'),
+      middleware,
+    }),
+    'scira-qwen-3-vl-30b': novita.chatModel('qwen/qwen3-vl-30b-a3b-instruct'),
+    'scira-qwen-3-vl-30b-thinking': wrapLanguageModel({
+      model: novita.chatModel('qwen/qwen3-vl-30b-a3b-thinking'),
+      middleware,
+    }),
+    'scira-qwen-3-next': huggingface.chatModel('Qwen/Qwen3-Next-80B-A3B-Instruct:hyperbolic'),
+    'scira-qwen-3-next-think': wrapLanguageModel({
+      model: huggingface.chatModel('Qwen/Qwen3-Next-80B-A3B-Thinking:hyperbolic'),
+      middleware: [middlewareWithStartWithReasoning],
+    }),
+    'scira-qwen-3-max': gateway('alibaba/qwen3-max'),
+    'scira-qwen-3-max-preview': gateway('alibaba/qwen3-max-preview'),
+    'scira-qwen-3-max-preview-thinking': gateway('alibaba/qwen3-max-thinking'),
+    'scira-qwen-235': gateway('alibaba/qwen-3-235b'),
+    'scira-qwen-235-think': wrapLanguageModel({
+      model: huggingface.chatModel('Qwen/Qwen3-235B-A22B-Thinking-2507:fireworks-ai'),
+      middleware: [middlewareWithStartWithReasoning],
+    }),
+    'scira-qwen-3.5-27b': novita.chatModel('qwen/qwen3.5-27b'),
+    'scira-qwen-3.5-35b': novita.chatModel('qwen/qwen3.5-35b-a3b'),
+    'scira-qwen-3.5-122b': novita.chatModel('qwen/qwen3.5-122b-a10b'),
+    'scira-qwen-3.5': novita.chatModel('qwen/qwen3.5-397b-a17b'),
+    'scira-qwen-3.5-plus': gateway('alibaba/qwen3.5-plus'),
+    'scira-qwen-3.5-flash': gateway('alibaba/qwen3.5-flash'),
+    'scira-qwen-3-vl': gateway('alibaba/qwen3-vl-instruct'),
+    'scira-qwen-3-vl-thinking': wrapLanguageModel({
+      model: gateway('alibaba/qwen3-vl-thinking'),
+      middleware,
+    }),
+    'scira-glm-air': gateway('zai/glm-4.5-air'),
     'scira-glm': wrapLanguageModel({
-      model: huggingface.chat('zai-org/GLM-4.5:fireworks-ai'),
+      model: gateway('zai/glm-4.5'),
       middleware,
     }),
-    'scira-glm-air': huggingface.chat('zai-org/GLM-4.5-Air:fireworks-ai'),
-    'scira-qwen-235': huggingface.chat('Qwen/Qwen3-235B-A22B-Instruct-2507:together'),
-    'scira-kimi-k2': groq('moonshotai/kimi-k2-instruct'),
-    'scira-haiku': anthropic('claude-3-5-haiku-20241022'),
+    'scira-glm-4.6': wrapLanguageModel({
+      model: huggingface.chatModel('zai-org/GLM-4.6:zai-org'),
+      middleware,
+    }),
+    'scira-glm-4.6v-flash': wrapLanguageModel({
+      model: huggingface.chatModel('zai-org/GLM-4.6V-Flash:zai-org'),
+      middleware,
+    }),
+    'scira-glm-4.6v': wrapLanguageModel({
+      model: huggingface.chatModel('zai-org/GLM-4.6V:zai-org'),
+      middleware,
+    }),
+    'scira-glm-4.7': wrapLanguageModel({
+      model: huggingface.chatModel('zai-org/GLM-4.7:novita'),
+      middleware,
+    }),
+    'scira-glm-4.7-flash': createRetryable({
+      model: novita.chatModel('zai-org/glm-4.7-flash'),
+      retries: [gateway('zai/glm-4.7-flashx')],
+    }),
+    'scira-glm-5': wrapLanguageModel({
+      model: zai('glm-5-turbo'),
+      middleware,
+    }),
+    'scira-glm-5-thinking': wrapLanguageModel({
+      model: zai('glm-5-turbo'),
+      middleware,
+    }),
+    'scira-minimax': wrapLanguageModel({
+      model: novita.chatModel('minimaxai/minimax-m1-80k'),
+      middleware,
+    }),
+    'scira-minimax-m2': wrapLanguageModel({
+      model: gateway('minimax/minimax-m2'),
+      middleware,
+    }),
+    'scira-minimax-m2.1': wrapLanguageModel({
+      model: gateway('minimax/minimax-m2.1'),
+      middleware,
+    }),
+    'scira-minimax-m2.1-lightning': wrapLanguageModel({
+      model: gateway('minimax/minimax-m2.1-lightning'),
+      middleware,
+    }),
+    'scira-minimax-m2.7': wrapLanguageModel({
+      model: minimax.chatModel('MiniMax-M2.7-highspeed'),
+      middleware,
+    }),
+    'scira-minimax-m2.5': createRetryable({
+      model: baseten.chatModel('MiniMaxAI/MiniMax-M2.5'),
+      retries: [
+        minimax.chatModel('MiniMax-M2.5-highspeed'),
+        novita.chatModel('minimax/minimax-m2.5'),
+        gateway('minimax/minimax-m2.5'),
+      ],
+    }),
+    'scira-cmd-a': cohere('command-a-03-2025'),
+    'scira-cmd-a-think': cohere('command-a-reasoning-08-2025'),
+    'scira-kimi-k2-v2': groq('moonshotai/kimi-k2-instruct-0905'),
+    'scira-kimi-k2-v2-thinking': wrapLanguageModel({
+      model: gateway('moonshotai/kimi-k2-thinking-turbo'),
+      middleware,
+    }),
+    'scira-kimi-k2.5': createRetryable({
+      model: baseten.chatModel('moonshotai/Kimi-K2.5'),
+      retries: [gateway('moonshotai/kimi-k2.5')],
+    }),
+    'scira-kimi-k2.5-thinking': gateway('moonshotai/kimi-k2.5'),
+    'scira-ministral-3b': mistral('ministral-3b-2512'),
+    'scira-ministral-8b': mistral('ministral-8b-2512'),
+    'scira-ministral-14b': mistral('ministral-14b-2512'),
+    'scira-mistral-large': mistral('mistral-large-2512'),
     'scira-mistral-medium': mistral('mistral-medium-2508'),
-    'scira-google-lite': google('gemini-2.5-flash-lite'),
-    'scira-google': google('gemini-2.5-flash'),
-    'scira-google-pro': google('gemini-2.5-pro'),
-    'scira-anthropic': anthropic('claude-sonnet-4-20250514'),
-    'scira-llama-4': groq('meta-llama/llama-4-maverick-17b-128e-instruct'),
+    'scira-magistral-small': mistral('magistral-small-2509'),
+    'scira-magistral-medium': mistral('magistral-medium-2509'),
+    'scira-mistral-small': mistral('mistral-small-2603'),
+    'scira-mistral-small-think': mistral('mistral-small-2603'),
+    'scira-leanstral': mistral('labs-leanstral-2603'),
+    'scira-devstral': mistral('devstral-2512'),
+    'scira-devstral-small': mistral('labs-devstral-small-2512'),
+    'scira-google-lite': google('gemini-flash-lite-latest'),
+    'scira-google': google('gemini-flash-latest'),
+    'scira-google-think': google('gemini-flash-latest'),
+    'scira-google-pro': createRetryable({
+      model: google('gemini-2.5-pro'),
+      retries: [gateway('google/gemini-2.5-pro')],
+    }),
+    'scira-google-pro-think': createRetryable({
+      model: google('gemini-2.5-pro'),
+      retries: [gateway('google/gemini-2.5-pro')],
+    }),
+    'scira-gemini-3-flash': createRetryable({
+      model: google('gemini-3-flash-preview'),
+      retries: [gateway('google/gemini-3-flash')],
+    }),
+    'scira-gemini-3-flash-think': google('gemini-3-flash-preview'),
+    'scira-gemini-3.1-flash-lite': createRetryable({
+      model: gateway('google/gemini-3.1-flash-lite-preview'),
+      retries: [google('gemini-3.1-flash-lite-preview')],
+    }),
+    'scira-gemini-3.1-flash-lite-think': createRetryable({
+      model: gateway('google/gemini-3.1-flash-lite-preview'),
+      retries: [google('gemini-3.1-flash-lite-preview')],
+    }),
+    'scira-gemini-3.1-pro': createRetryable({
+      model: google('gemini-3.1-pro-preview'),
+      retries: [gateway('google/gemini-3.1-pro-preview')],
+    }),
+    'scira-anthropic-small': anthropic('claude-haiku-4-5'),
+    'scira-anthropic': anthropic('claude-sonnet-4-5'),
+    'scira-anthropic-think': anthropic('claude-sonnet-4-5'),
+    'scira-anthropic-sonnet-4.6': anthropic('claude-sonnet-4-6'),
+    'scira-anthropic-sonnet-4.6-think': anthropic('claude-sonnet-4-6'),
+    'scira-mimo-v2-flash': wrapLanguageModel({
+      model: gateway('xiaomi/mimo-v2-flash'),
+      middleware,
+    }),
+    'scira-mimo-v2-pro': wrapLanguageModel({
+      model: gateway('xiaomi/mimo-v2-pro'),
+      middleware,
+    }),
+    'scira-anthropic-opus': anthropic('claude-opus-4-5'),
+    'scira-anthropic-opus-think': anthropic('claude-opus-4-5'),
+    'scira-anthropic-opus-4.6': anthropic('claude-opus-4-6'),
+    'scira-anthropic-opus-4.6-think': anthropic('claude-opus-4-6'),
+    'scira-nova-2-lite': gateway('amazon/nova-2-lite'),
+    'scira-seed-1.6': wrapLanguageModel({
+      model: ark('seed-1-6-250915'),
+      middleware,
+    }),
+    'scira-seed-1.8': wrapLanguageModel({
+      model: ark('seed-1-8-251228'),
+      middleware,
+    }),
+    'scira-seed-2.0-mini': wrapLanguageModel({
+      model: ark('seed-2-0-mini-260215'),
+      middleware,
+    }),
+    'scira-seed-2.0-lite': ark('seed-2-0-lite-260228'),
+    'scira-seed-1.6-flash': wrapLanguageModel({
+      model: ark('seed-1-6-flash-250715'),
+      middleware,
+    }),
+    'scira-mercury-2': gateway('inception/mercury-2'),
   },
 });
 
-interface Model {
-  value: string;
-  label: string;
-  description: string;
-  vision: boolean;
-  reasoning: boolean;
-  experimental: boolean;
-  category: string;
-  pdf: boolean;
-  pro: boolean;
-  requiresAuth: boolean;
-  freeUnlimited: boolean;
-  maxOutputTokens: number;
-}
-
-export const models: Model[] = [
-  // Free Unlimited Models (xAI)
-  {
-    value: 'scira-default',
-    label: 'Grok 3 Mini',
-    description: "xAI's most efficient reasoning LLM.",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Mini',
-    pdf: false,
-    pro: false,
-    requiresAuth: false,
-    freeUnlimited: false,
-    maxOutputTokens: 16000,
-  },
-  {
-    value: 'scira-grok-3',
-    label: 'Grok 3',
-    description: "xAI's recent smartest LLM",
-    vision: false,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 16000,
-  },
-  {
-    value: 'scira-grok-4',
-    label: 'Grok 4',
-    description: "xAI's most intelligent vision LLM",
-    vision: true,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 16000,
-  },
-
-  // Mini Models (Free/Paid)
-  {
-    value: 'scira-qwen-32b',
-    label: 'Qwen 3 32B',
-    description: "Alibaba's advanced reasoning LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Mini',
-    pdf: false,
-    pro: false,
-    requiresAuth: false,
-    freeUnlimited: false,
-    maxOutputTokens: 40960,
-  },
-  {
-    value: 'scira-deepseek-v3',
-    label: 'DeepSeek V3.1',
-    description: "DeepSeek's advanced base LLM",
-    vision: false,
-    reasoning: false,
-    experimental: false,
-    category: 'Mini',
-    pdf: false,
-    pro: false,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 16000,
-  },
-  {
-    value: 'scira-5-nano',
-    label: 'GPT 5 Nano',
-    description: "OpenAI's latest flagship nano LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Mini',
-    pdf: true,
-    pro: false,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 128000,
-  },
-  {
-    value: 'scira-5-mini',
-    label: 'GPT 5 Mini',
-    description: "OpenAI's latest flagship mini LLM",
-    vision: true,
-    reasoning: true,
-    experimental: false,
-    category: 'Mini',
-    pdf: true,
-    pro: false,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 128000,
-  },
-  {
-    value: 'scira-glm-air',
-    label: 'GLM 4.5 Air',
-    description: "Zhipu AI's efficient base LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Mini',
-    pdf: false,
-    pro: false,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 130000,
-  },
-  {
-    value: 'scira-google-lite',
-    label: 'Gemini 2.5 Flash Lite',
-    description: "Google's advanced smallest LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Mini',
-    pdf: true,
-    pro: false,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 10000,
-  },
-
-  // Pro Models
-  {
-    value: 'scira-kimi-k2',
-    label: 'Kimi K2',
-    description: "MoonShot AI's advanced base LLM",
-    vision: false,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 10000,
-  },
-  {
-    value: 'scira-qwen-coder',
-    label: 'Qwen 3 Coder 480B-A35B',
-    description: "Alibaba's advanced coding LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 130000,
-  },
-  {
-    value: 'scira-5',
-    label: 'GPT 5',
-    description: "OpenAI's latest flagship LLM",
-    vision: true,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 128000,
-  },
-  {
-    value: 'scira-5-high',
-    label: 'GPT 5 (Max)',
-    description: "OpenAI's latest flagship reasoning LLM",
-    vision: true,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 128000,
-  },
-  {
-    value: 'scira-anthropic',
-    label: 'Claude 4 Sonnet',
-    description: "Anthropic's most advanced LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 8000,
-  },
-  {
-    value: 'scira-qwen-235',
-    label: 'Qwen 3 235B A22B',
-    description: "Qwen's advanced instruct LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 100000,
-  },
-  {
-    value: 'scira-mistral-medium',
-    label: 'Mistral Medium',
-    description: "Mistral's medium LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 8000,
-  },
-  {
-    value: 'scira-gpt-oss-20',
-    label: 'OpenAI GPT OSS 20b',
-    description: "OpenAI's advanced small OSS LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 8000,
-  },
-  {
-    value: 'scira-gpt-oss-120',
-    label: 'OpenAI GPT OSS 120b',
-    description: "OpenAI's advanced OSS LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 8000,
-  },
-  {
-    value: 'scira-google',
-    label: 'Gemini 2.5 Flash',
-    description: "Google's advanced small LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 10000,
-  },
-  {
-    value: 'scira-glm',
-    label: 'GLM 4.5',
-    description: "Zhipu AI's advanced base LLM",
-    vision: false,
-    reasoning: true,
-    experimental: false,
-    category: 'Pro',
-    pdf: false,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 13000,
-  },
-  {
-    value: 'scira-google-pro',
-    label: 'Gemini 2.5 Pro',
-    description: "Google's most advanced LLM",
-    vision: true,
-    reasoning: false,
-    experimental: false,
-    category: 'Pro',
-    pdf: true,
-    pro: true,
-    requiresAuth: true,
-    freeUnlimited: false,
-    maxOutputTokens: 10000,
-  },
-
-  // Experimental Models
-  {
-    value: 'scira-llama-4',
-    label: 'Llama 4 Maverick',
-    description: "Meta's latest LLM",
-    vision: true,
-    reasoning: false,
-    experimental: true,
-    category: 'Experimental',
-    pdf: false,
-    pro: false,
-    requiresAuth: false,
-    freeUnlimited: false,
-    maxOutputTokens: 8000,
-  },
-];
-
-// Helper functions for model access checks
-export function getModelConfig(modelValue: string) {
-  return models.find((model) => model.value === modelValue);
-}
-
-export function requiresAuthentication(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.requiresAuth || false;
-}
-
-export function requiresProSubscription(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.pro || false;
-}
-
-export function isFreeUnlimited(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.freeUnlimited || false;
-}
-
-export function hasVisionSupport(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.vision || false;
-}
-
-export function hasPdfSupport(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.pdf || false;
-}
-
-export function hasReasoningSupport(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.reasoning || false;
-}
-
-export function isExperimentalModel(modelValue: string): boolean {
-  const model = getModelConfig(modelValue);
-  return model?.experimental || false;
-}
-
-export function getMaxOutputTokens(modelValue: string): number {
-  const model = getModelConfig(modelValue);
-  return model?.maxOutputTokens || 8000;
-}
-
-// Access control helper
-export function canUseModel(modelValue: string, user: any, isProUser: boolean): { canUse: boolean; reason?: string } {
-  const model = getModelConfig(modelValue);
-
-  if (!model) {
-    return { canUse: false, reason: 'Model not found' };
-  }
-
-  // Check if model requires authentication
-  if (model.requiresAuth && !user) {
-    return { canUse: false, reason: 'authentication_required' };
-  }
-
-  // Check if model requires Pro subscription
-  if (model.pro && !isProUser) {
-    return { canUse: false, reason: 'pro_subscription_required' };
-  }
-
-  return { canUse: true };
-}
-
-// Helper to check if user should bypass rate limits
-export function shouldBypassRateLimits(modelValue: string, user: any): boolean {
-  const model = getModelConfig(modelValue);
-  return Boolean(user && model?.freeUnlimited);
-}
-
-// Get acceptable file types for a model
-export function getAcceptedFileTypes(modelValue: string, isProUser: boolean): string {
-  const model = getModelConfig(modelValue);
-  if (model?.pdf && isProUser) {
-    return 'image/*,.pdf';
-  }
-  return 'image/*';
-}
-
-// Legacy arrays for backward compatibility (deprecated - use helper functions instead)
-export const authRequiredModels = models.filter((m) => m.requiresAuth).map((m) => m.value);
-export const proRequiredModels = models.filter((m) => m.pro).map((m) => m.value);
-export const freeUnlimitedModels = models.filter((m) => m.freeUnlimited).map((m) => m.value);
+// Re-export all model data and pure helpers from the client-safe models module
+export type { ModelProvider, ProviderInfo, Model } from './models';
+export {
+  PROVIDERS,
+  models,
+  getModelConfig,
+  requiresAuthentication,
+  requiresProSubscription,
+  requiresMaxSubscription,
+  isFreeUnlimited,
+  hasVisionSupport,
+  hasPdfSupport,
+  hasReasoningSupport,
+  isExperimentalModel,
+  getMaxOutputTokens,
+  getModelParameters,
+  canUseModel,
+  shouldBypassRateLimits,
+  getAcceptedFileTypes,
+  supportsExtremeMode,
+  getExtremeModels,
+  supportsCanvasMode,
+  isModelRestrictedInRegion,
+  getFilteredModels,
+  authRequiredModels,
+  proRequiredModels,
+  freeUnlimitedModels,
+  getModelProvider,
+  getModelProviderInfo,
+  getActiveProviders,
+  getModelsByProvider,
+} from './models';

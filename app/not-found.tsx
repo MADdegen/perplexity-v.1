@@ -8,7 +8,7 @@ import { ArrowLeft } from 'lucide-react';
 
 export default function NotFound() {
   return (
-    <div className="flex flex-col font-sans items-center justify-center min-h-screen bg-background text-foreground p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background text-foreground p-4">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -32,7 +32,7 @@ export default function NotFound() {
         </p>
 
         <div className="flex justify-center">
-          <Link href="/">
+          <Link href="/new">
             <Button variant="default" className="flex items-center gap-2 px-4 py-2 rounded-full">
               <ArrowLeft size={18} />
               <span>Return to home</span>

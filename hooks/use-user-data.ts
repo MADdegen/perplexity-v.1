@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { getCurrentUser } from '@/app/actions';
 import { type ComprehensiveUserData } from '@/lib/user-data';
-import { shouldBypassRateLimits } from '@/ai/providers';
+import { shouldBypassRateLimits } from '@/ai/models';
 
 export function useUserData() {
   const {
@@ -13,9 +13,11 @@ export function useUserData() {
   } = useQuery({
     queryKey: ['comprehensive-user-data'],
     queryFn: getCurrentUser,
-    staleTime: 1000 * 60 * 30, // 30 minutes - matches server cache
-    gcTime: 1000 * 60 * 60, // 1 hour cache retention
+    // Keep reasonably fresh without frequent refetches on reload/focus
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
     refetchOnWindowFocus: false,
+    refetchOnMount: false,
     retry: 2,
   });
 
@@ -41,15 +43,15 @@ export function useUserData() {
     polarSubscription: userData?.polarSubscription,
     hasPolarSubscription: Boolean(userData?.polarSubscription),
 
-    // DodoPayments details
-    dodoPayments: userData?.dodoPayments,
-    hasDodoPayments: Boolean(userData?.dodoPayments?.hasPayments),
-    dodoExpiresAt: userData?.dodoPayments?.expiresAt,
-    isDodoExpiring: Boolean(userData?.dodoPayments?.isExpiringSoon),
-    isDodoExpired: Boolean(userData?.dodoPayments?.isExpired),
+    // Dodo Subscription details
+    dodoSubscription: userData?.dodoSubscription,
+    hasDodoSubscription: Boolean(userData?.dodoSubscription?.hasSubscriptions),
+    dodoExpiresAt: userData?.dodoSubscription?.expiresAt,
+    isDodoExpiring: Boolean(userData?.dodoSubscription?.isExpiringSoon),
+    isDodoExpired: Boolean(userData?.dodoSubscription?.isExpired),
 
-    // Payment history
-    paymentHistory: userData?.paymentHistory || [],
+    // Subscription history
+    subscriptionHistory: userData?.subscriptionHistory || [],
 
     // Rate limiting helpers
     shouldCheckLimits: !isLoading && userData && !userData.isProUser,
@@ -64,26 +66,26 @@ export function useUserData() {
     // Legacy compatibility helpers
     subscriptionData: userData?.polarSubscription
       ? {
-          hasSubscription: true,
-          subscription: userData.polarSubscription,
-        }
+        hasSubscription: true,
+        subscription: userData.polarSubscription,
+      }
       : { hasSubscription: false },
 
-    // Map dodoPayments to legacy dodoProStatus structure for settings dialog
-    dodoProStatus: userData?.dodoPayments
+    // Map dodoSubscription to legacy dodoProStatus structure for settings dialog
+    dodoProStatus: userData?.dodoSubscription
       ? {
-          isProUser: userData.proSource === 'dodo' && userData.isProUser,
-          hasPayments: userData.dodoPayments.hasPayments,
-          expiresAt: userData.dodoPayments.expiresAt,
-          mostRecentPayment: userData.dodoPayments.mostRecentPayment,
-          daysUntilExpiration: userData.dodoPayments.daysUntilExpiration,
-          isExpired: userData.dodoPayments.isExpired,
-          isExpiringSoon: userData.dodoPayments.isExpiringSoon,
-          source: userData.proSource,
-        }
+        isProUser: userData.proSource === 'dodo' && userData.isProUser,
+        hasSubscriptions: userData.dodoSubscription.hasSubscriptions,
+        expiresAt: userData.dodoSubscription.expiresAt,
+        mostRecentSubscription: userData.dodoSubscription.mostRecentSubscription,
+        daysUntilExpiration: userData.dodoSubscription.daysUntilExpiration,
+        isExpired: userData.dodoSubscription.isExpired,
+        isExpiringSoon: userData.dodoSubscription.isExpiringSoon,
+        source: userData.proSource,
+      }
       : null,
 
-    expiresAt: userData?.dodoPayments?.expiresAt,
+    expiresAt: userData?.dodoSubscription?.expiresAt,
   };
 }
 

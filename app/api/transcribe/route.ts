@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await transcribe({
-      model: elevenlabs.transcription('scribe_v1'),
+      model: elevenlabs.transcription('scribe_v2'),
       audio: await audio.arrayBuffer(),
     });
 

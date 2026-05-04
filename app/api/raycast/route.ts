@@ -1,12 +1,11 @@
 import { webSearchTool } from '@/lib/tools';
 import { xSearchTool } from '@/lib/tools/x-search';
-import { groq } from '@ai-sdk/groq';
-import { xai } from '@ai-sdk/xai';
 import { convertToModelMessages, customProvider, generateText, stepCountIs } from 'ai';
+import { xai } from '@ai-sdk/xai';
 
 const scira = customProvider({
   languageModels: {
-    'scira-default': groq('openai/gpt-oss-20b'),
+    'scira-default': xai('grok-4-1-fast-non-reasoning'),
   },
 });
 
@@ -17,6 +16,7 @@ const groupSystemPrompts = {
   web: `You are Scira for Raycast, a powerful AI web search assistant.
 
 Today's Date: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit', weekday: 'short' })}
+Current Time: ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}
 
 ### Core Guidelines:
 - Always run the web_search tool first before composing your response.
@@ -28,7 +28,12 @@ Today's Date: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month:
 ### Web Search Guidelines:
 - Always make multiple targeted queries (2-4) to get comprehensive results.
 - Never use the same query twice and always make more than 2 queries.
-- Specify the year or "latest" in queries to fetch recent information.
+- **⚠️ CRITICAL: Always include date/time context in search queries:**
+  - For current events: "latest", "${new Date().getFullYear()}", "today", "current", "recent"
+  - For historical info: specific years or date ranges
+  - For time-sensitive topics: "newest", "updated", "${new Date().getFullYear()}"
+  - **NO TEMPORAL ASSUMPTIONS**: Never assume time periods - always be explicit about dates/years
+  - Examples: "latest AI news ${new Date().getFullYear()}", "current stock prices today", "recent developments in ${new Date().getFullYear()}"
 - You can select "general", "news" or "finance" in the search type.
 - Place citations directly after relevant sentences or paragraphs.
 - Citation format: [Source Title](URL)
@@ -86,12 +91,13 @@ export async function POST(req: Request) {
     model: scira.languageModel(model),
     system: systemPrompt,
     stopWhen: stepCountIs(2),
-    messages: convertToModelMessages(messages),
+    messages: await convertToModelMessages(messages),
     temperature: 0,
+    toolChoice: 'auto',
     experimental_activeTools: activeTools,
     tools: {
-      web_search: webSearchTool(undefined, "exa"),
-      x_search: xSearchTool,
+      web_search: webSearchTool(undefined, 'exa'),
+      x_search: xSearchTool(undefined),
     },
   });
 

@@ -1,6 +1,11 @@
 import type { NextConfig } from 'next';
-import './env/server';
-import './env/client';
+import { fileURLToPath } from 'node:url';
+import { createJiti } from 'jiti';
+
+const jiti = createJiti(fileURLToPath(import.meta.url));
+
+jiti.import('./env/server.ts');
+jiti.import('./env/client.ts');
 
 const nextConfig: NextConfig = {
   compiler: {
@@ -12,31 +17,97 @@ const nextConfig: NextConfig = {
           }
         : false,
   },
+  // Add Turbopack alias to resolve MathJax default font to NewCM font
+  turbopack: {
+    resolveAlias: {
+      '#default-font': '@mathjax/mathjax-newcm-font/mjs',
+      '#default-font/*': '@mathjax/mathjax-newcm-font/mjs/*',
+    },
+    resolveExtensions: ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json'],
+  },
+  reactCompiler: true,
   experimental: {
-    useCache: true,
+    webpackMemoryOptimizations: true,
+    turbopackFileSystemCacheForDev: true,
+    turbopackFileSystemCacheForBuild: true,
     optimizePackageImports: [
       '@phosphor-icons/react',
       'lucide-react',
       '@hugeicons/react',
       '@hugeicons/core-free-icons',
       'date-fns',
+      '@radix-ui/react-tooltip',
+      '@radix-ui/react-dropdown-menu',
+      '@radix-ui/react-dialog',
+      '@radix-ui/react-alert-dialog',
+      '@radix-ui/react-accordion',
+      '@radix-ui/react-select',
+      '@radix-ui/react-popover',
+      '@radix-ui/react-avatar',
+      '@radix-ui/react-separator',
+      '@radix-ui/react-switch',
+      '@radix-ui/react-checkbox',
+      '@radix-ui/react-label',
+      '@radix-ui/react-slider',
+      '@radix-ui/react-tabs',
+      '@radix-ui/react-scroll-area',
+      '@radix-ui/react-collapsible',
+      '@radix-ui/react-navigation-menu',
+      '@radix-ui/react-hover-card',
+      '@radix-ui/react-progress',
+      'recharts',
+      'sileo',
     ],
     serverActions: {
-      bodySizeLimit: '10mb',
+      bodySizeLimit: '2000mb',
     },
     staleTimes: {
       dynamic: 10,
       static: 30,
     },
   },
-  serverExternalPackages: ['@aws-sdk/client-s3', 'prettier'],
-  transpilePackages: ['geist', '@daytonaio/sdk'],
-  output: 'standalone',
+  // Ensure MathJax packages are treated as externals for server bundling
+  serverExternalPackages: [
+    '@aws-sdk/client-s3',
+    'prettier',
+    'experimental-fast-webstreams',
+    '@basetenlabs/performance-client',
+    '@ai-sdk/baseten',
+  ],
+  transpilePackages: [
+    'geist',
+    '@daytonaio/sdk',
+    'shiki',
+    'ai-resumable-stream',
+    '@t3-oss/env-nextjs',
+    '@t3-oss/env-core',
+    '@mathjax/src',
+    '@mathjax/mathjax-newcm-font',
+  ],
   devIndicators: false,
+  // Webpack fallback alias for environments not using Turbopack
+  webpack: (config, { isServer }) => {
+    config.resolve = config.resolve || {};
+    config.resolve.alias = config.resolve.alias || {};
+    config.resolve.alias['#default-font'] = '@mathjax/mathjax-newcm-font/mjs';
+    config.resolve.alias['#default-font/*'] = '@mathjax/mathjax-newcm-font/mjs/*';
+
+    // Ensure proper module resolution for MathJax ESM modules
+    if (isServer) {
+      config.resolve.extensionAlias = {
+        '.js': ['.js', '.ts', '.tsx', '.jsx'],
+        '.mjs': ['.mjs', '.mts'],
+        '.cjs': ['.cjs', '.cts'],
+      };
+    }
+
+    return config;
+  },
   async headers() {
     return [
       {
-        source: '/(.*)',
+        // Apply X-Frame-Options: DENY to all routes except public legal pages
+        source: '/((?!privacy-policy|terms|about).*)',
         headers: [
           {
             key: 'X-Content-Type-Options',
@@ -45,6 +116,20 @@ const nextConfig: NextConfig = {
           {
             key: 'X-Frame-Options',
             value: 'DENY',
+          },
+          {
+            key: 'Referrer-Policy',
+            value: 'strict-origin-when-cross-origin',
+          },
+        ],
+      },
+      {
+        // Public legal pages — no X-Frame-Options so Google's OAuth validator can process them
+        source: '/(privacy-policy|terms|about)',
+        headers: [
+          {
+            key: 'X-Content-Type-Options',
+            value: 'nosniff',
           },
           {
             key: 'Referrer-Policy',
@@ -68,12 +153,17 @@ const nextConfig: NextConfig = {
       },
       {
         source: '/plst',
-        destination: 'https://peerlist.io/zaidmukaddam/project/scira-ai-20',
+        destination: 'https://peerlist.io/zaidmukaddam/project/scira-ai-30',
         permanent: true,
       },
       {
         source: '/blog',
         destination: 'https://blog.scira.ai',
+        permanent: true,
+      },
+      {
+        source: '/askscirabot',
+        destination: 'https://t.me/askscirabot',
         permanent: true,
       },
     ];
@@ -169,8 +259,7 @@ const nextConfig: NextConfig = {
         pathname: '/**',
       },
     ],
-    // Add additional settings for better image loading
-    domains: [],
+    // Add additional settings for better image loading,
     deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
     imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
     formats: ['image/webp'],

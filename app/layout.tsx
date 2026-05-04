@@ -3,30 +3,45 @@ import 'katex/dist/katex.min.css';
 import 'leaflet/dist/leaflet.css';
 
 import { Metadata, Viewport } from 'next';
-import { Be_Vietnam_Pro, Inter, Baumans } from 'next/font/google';
+import { Be_Vietnam_Pro, Baumans, Geist, Instrument_Serif } from 'next/font/google';
+import { GeistPixelSquare, GeistPixelGrid } from 'geist/font/pixel';
 import { NuqsAdapter } from 'nuqs/adapters/next/app';
-import { Toaster } from 'sonner';
-import { Analytics } from '@vercel/analytics/react';
-import { SpeedInsights } from '@vercel/speed-insights/next';
-import { Databuddy } from '@databuddy/sdk';
+import { Toaster } from '@/components/ui/sileo-toaster';
+import { SidebarProvider } from '@/components/ui/sidebar';
+import { NewChatHotkey } from '@/components/new-chat-hotkey';
+import { ClientAnalytics } from '@/components/client-analytics';
+import { HapticsProvider } from '@/components/haptics-provider';
 
 import { Providers } from './providers';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://scira.ai'),
   title: {
-    default: 'Scira AI',
+    default: 'Scira AI - Research anything. Do anything.',
     template: '%s | Scira AI',
-    absolute: 'Scira AI',
   },
-  description: 'Scira AI is a minimalistic AI-powered search engine that helps you find information on the internet.',
+  description:
+    'Scira is an AI assistant that searches the web in depth, cites sources, and connects to 100+ apps including GitHub, Notion, and Slack.',
   openGraph: {
     url: 'https://scira.ai',
     siteName: 'Scira AI',
   },
   keywords: [
+    'agentic research platform',
+    'agentic research',
+    'agentic search',
+    'agentic search engine',
+    'agentic search platform',
+    'agentic search tool',
+    'agentic search tool',
     'scira.ai',
+    'free ai search',
+    'ai search',
+    'ai research tool',
+    'ai search tool',
+    'perplexity ai alternative',
     'perplexity alternative',
+    'chatgpt alternative',
     'ai search engine',
     'search engine',
     'scira ai',
@@ -61,6 +76,17 @@ export const metadata: Metadata = {
     'AI',
     'perplexity',
   ],
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+    },
+  },
+  alternates: {
+    canonical: 'https://scira.ai',
+  },
 };
 
 export const viewport: Viewport = {
@@ -69,19 +95,12 @@ export const viewport: Viewport = {
   minimumScale: 1,
   maximumScale: 1,
   userScalable: false,
+  viewportFit: 'cover',
   themeColor: [
     { media: '(prefers-color-scheme: light)', color: '#F9F9F9' },
     { media: '(prefers-color-scheme: dark)', color: '#111111' },
   ],
 };
-
-const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-sans',
-  preload: true,
-  weight: 'variable',
-  display: 'swap',
-});
 
 const beVietnamPro = Be_Vietnam_Pro({
   subsets: ['latin'],
@@ -99,7 +118,24 @@ const baumans = Baumans({
   weight: ['400'],
 });
 
-export default function RootLayout({
+const geist = Geist({
+  subsets: ['latin'],
+  variable: '--font-sans',
+  preload: true,
+  display: 'swap',
+  weight: ['400', '500', '600', '700'],
+});
+
+const instrumentSerif = Instrument_Serif({
+  subsets: ['latin'],
+  variable: '--font-instrument-serif',
+  preload: true,
+  display: 'swap',
+  weight: ['400'],
+  style: ['normal', 'italic'],
+});
+
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
@@ -107,18 +143,20 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${inter.variable} ${beVietnamPro.variable} ${baumans.variable} font-sans antialiased`}
+        className={`${geist.variable} ${beVietnamPro.variable} ${baumans.variable} ${instrumentSerif.variable} ${GeistPixelSquare.variable} ${GeistPixelGrid.variable} font-sans antialiased`}
         suppressHydrationWarning
       >
         <NuqsAdapter>
           <Providers>
-            <Toaster position="top-center" />
-            {children}
+            <SidebarProvider>
+              <Toaster position="top-center" />
+              <HapticsProvider />
+              <NewChatHotkey />
+              {children}
+            </SidebarProvider>
           </Providers>
         </NuqsAdapter>
-        <Databuddy clientId={process.env.DATABUDDY_CLIENT_ID!} enableBatching={true} trackSessions={true} />
-        <Analytics />
-        <SpeedInsights />
+        <ClientAnalytics />
       </body>
     </html>
   );
