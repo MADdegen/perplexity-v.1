@@ -1,17 +1,21 @@
-import { drizzle } from 'drizzle-orm/neon-http';
-import * as schema from '@/lib/db/schema';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { withReplicas } from 'drizzle-orm/pg-core';
 import { serverEnv } from '@/env/server';
-import { upstashCache } from 'drizzle-orm/cache/upstash';
-import { neon } from '@neondatabase/serverless';
+import * as schema from './schema';
 
-const sql = neon(serverEnv.DATABASE_URL);
-
-export const db = drizzle(sql, {
+export const maindb = drizzle(serverEnv.DATABASE_URL, {
   schema,
-  cache: upstashCache({
-    url: process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-    global: true,
-    config: { ex: 600 },
-  }),
 });
+
+const dbread1 = drizzle(process.env.READ_DB_1!, {
+  schema,
+});
+
+const dbread2 = drizzle(process.env.READ_DB_2!, {
+  schema,
+});
+
+export const db = withReplicas(maindb, [dbread1, dbread2]);
+
+// Export all database instances for cache invalidation
+export const allDatabases = [maindb, dbread1, dbread2] as const;
