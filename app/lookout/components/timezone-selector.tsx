@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { HugeiconsIcon } from '@hugeicons/react';
+import { HugeiconsIcon } from '@/components/ui/hugeicons';
 import { CircleArrowUpDownIcon, Tick01Icon } from '@hugeicons/core-free-icons';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -26,7 +26,7 @@ export function TimezoneSelector({ value, onChange }: TimezoneSelectorProps) {
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className="h-9 w-full justify-between text-left font-normal"
+          className="h-9 w-full justify-between text-left font-normal rounded-lg text-sm"
         >
           {selectedTimezone
             ? selectedTimezone.label.length > 30
@@ -35,10 +35,10 @@ export function TimezoneSelector({ value, onChange }: TimezoneSelectorProps) {
             : 'Select timezone'}
           <HugeiconsIcon
             icon={CircleArrowUpDownIcon}
-            size={16}
+            size={14}
             color="currentColor"
             strokeWidth={1.5}
-            className="shrink-0 opacity-50"
+            className="shrink-0 opacity-40"
           />
         </Button>
       </PopoverTrigger>
@@ -51,10 +51,10 @@ export function TimezoneSelector({ value, onChange }: TimezoneSelectorProps) {
         collisionPadding={8}
       >
         <Command>
-          <CommandInput placeholder="Search timezone..." className="h-9" />
+          <CommandInput placeholder="Search timezone..." className="h-9 text-sm" />
           <CommandEmpty>No timezone found.</CommandEmpty>
           <CommandList
-            className="max-h-[200px] !overflow-y-scroll"
+            className="max-h-[200px] overflow-y-scroll!"
             style={{ overflowY: 'scroll', pointerEvents: 'auto' }}
             tabIndex={0}
             onWheel={(e) => {
@@ -79,11 +79,11 @@ export function TimezoneSelector({ value, onChange }: TimezoneSelectorProps) {
                     onChange(option.value);
                     setOpen(false);
                   }}
-                  className="text-sm"
+                  className="text-xs"
                 >
                   <HugeiconsIcon
                     icon={Tick01Icon}
-                    size={16}
+                    size={14}
                     color="currentColor"
                     strokeWidth={1.5}
                     className={cn('mr-2', value === option.value ? 'opacity-100' : 'opacity-0')}

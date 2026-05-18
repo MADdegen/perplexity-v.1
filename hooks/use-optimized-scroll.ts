@@ -1,94 +1,70 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useRef, useCallback } from 'react';
 
-interface UseOptimizedScrollOptions {
-  enabled?: boolean;
-  threshold?: number;
-  behavior?: ScrollBehavior;
-  debounceMs?: number;
+const NEAR_BOTTOM_THRESHOLD = 80; // px from bottom to consider "at bottom"
+
+export interface UseOptimizedScrollOptions {
+  /** When this ref is true, scrollToBottom is a no-op (e.g. touch active so we don't fight the user). */
+  skipScrollWhen?: React.RefObject<boolean>;
 }
 
 export function useOptimizedScroll(
   targetRef: React.RefObject<HTMLElement | null>,
-  options: UseOptimizedScrollOptions = {},
+  options?: UseOptimizedScrollOptions,
 ) {
-  const { enabled = true, threshold = 100, behavior = 'smooth', debounceMs = 100 } = options;
+  const hasManuallyScrolledRef = useRef(false);
+  const rafRef = useRef<number | null>(null);
+  const skipWhen = options?.skipScrollWhen;
 
-  const [isAtBottom, setIsAtBottom] = useState(false);
-  const [hasManuallyScrolled, setHasManuallyScrolled] = useState(false);
-  const isAutoScrollingRef = useRef(false);
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isNearBottom = useCallback(() => {
+    const target = targetRef.current;
+    if (!target) return true;
 
-  // Debounced scroll handler
-  const handleScroll = useCallback(() => {
-    if (scrollTimeoutRef.current) {
-      clearTimeout(scrollTimeoutRef.current);
+    if (target.scrollHeight > target.clientHeight) {
+      const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+      return distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
     }
 
-    scrollTimeoutRef.current = setTimeout(() => {
-      if (!isAutoScrollingRef.current) {
-        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-        const scrollHeight = document.documentElement.scrollHeight;
-        const clientHeight = window.innerHeight;
+    const docEl = document.documentElement;
+    const distanceFromBottom = docEl.scrollHeight - window.scrollY - window.innerHeight;
+    return distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+  }, [targetRef]);
 
-        const atBottom = scrollHeight - (scrollTop + clientHeight) < threshold;
-        setIsAtBottom(atBottom);
+  const scrollToBottom = useCallback(() => {
+    if (hasManuallyScrolledRef.current) return;
+    if (skipWhen?.current) return;
 
-        if (!atBottom) {
-          setHasManuallyScrolled(true);
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        if (hasManuallyScrolledRef.current || skipWhen?.current) return;
+        const target = targetRef.current;
+        if (!target) return;
+
+        if (target.scrollHeight > target.clientHeight) {
+          target.scrollTop = target.scrollHeight;
+        } else {
+          target.scrollIntoView({ behavior: 'auto', block: 'end' });
         }
-      }
-    }, debounceMs);
-  }, [threshold, debounceMs]);
-
-  // Auto scroll to element
-  const scrollToElement = useCallback(
-    (instant = false) => {
-      if (!enabled || !targetRef.current) return;
-
-      isAutoScrollingRef.current = true;
-
-      targetRef.current.scrollIntoView({
-        behavior: instant ? 'instant' : behavior,
-        block: 'end',
       });
+    });
+  }, [targetRef, skipWhen]);
 
-      // Reset auto-scrolling flag after animation
-      setTimeout(
-        () => {
-          isAutoScrollingRef.current = false;
-        },
-        instant ? 0 : 500,
-      );
+  const markManualScroll = useCallback(
+    (options?: { userScrolledUp?: boolean }) => {
+      if (options?.userScrolledUp) {
+        hasManuallyScrolledRef.current = true;
+        return;
+      }
+      hasManuallyScrolledRef.current = !isNearBottom();
     },
-    [enabled, targetRef, behavior],
+    [isNearBottom],
   );
 
-  // Reset manual scroll state
   const resetManualScroll = useCallback(() => {
-    setHasManuallyScrolled(false);
+    hasManuallyScrolledRef.current = false;
   }, []);
 
-  // Set up scroll listener
-  useEffect(() => {
-    if (!enabled) return;
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
-
-    // Initial check
-    handleScroll();
-
-    return () => {
-      window.removeEventListener('scroll', handleScroll);
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current);
-      }
-    };
-  }, [enabled, handleScroll]);
-
-  return {
-    isAtBottom,
-    hasManuallyScrolled,
-    scrollToElement,
-    resetManualScroll,
-  };
+  return { scrollToBottom, markManualScroll, resetManualScroll, isNearBottom };
 }

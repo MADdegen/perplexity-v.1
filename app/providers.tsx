@@ -1,32 +1,26 @@
 'use client';
 
-import { clientEnv } from '@/env/client';
 import { ThemeProvider } from 'next-themes';
-import posthog from 'posthog-js';
-import { PostHogProvider } from 'posthog-js/react';
 import { ReactNode } from 'react';
-import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@radix-ui/react-tooltip';
 import { UserProvider } from '@/contexts/user-context';
 import { DataStreamProvider } from '@/components/data-stream-provider';
 
-if (typeof window !== 'undefined') {
-  posthog.init(clientEnv.NEXT_PUBLIC_POSTHOG_KEY!, {
-    api_host: clientEnv.NEXT_PUBLIC_POSTHOG_HOST,
-    person_profiles: 'always',
-  });
-}
-
 // Create a client
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 1000 * 60 * 0.5, // 30 seconds
-      refetchOnWindowFocus: true, // Enable for real-time updates
-      gcTime: 1000 * 60 * 0.5, // 30 seconds
+      staleTime: 1000 * 60 * 5, // 5 minutes - increased to reduce unnecessary refetches
+      refetchOnWindowFocus: false, // Disabled globally for better performance - enable per-query if needed
+      refetchOnMount: false, // Use cached data when available
+      gcTime: 1000 * 60 * 30, // 30 minutes - keep cached data much longer
       retry: 3,
       retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+      // Use structural sharing to prevent unnecessary re-renders
+      structuralSharing: true,
+      // Keep showing placeholder data while fetching new data
+      notifyOnChangeProps: ['data', 'error', 'isLoading'],
     },
   },
 });
@@ -36,11 +30,15 @@ export function Providers({ children }: { children: ReactNode }) {
     <QueryClientProvider client={queryClient}>
       <UserProvider>
         <DataStreamProvider>
-          <PostHogProvider client={posthog}>
-            <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-              <TooltipProvider>{children}</TooltipProvider>
-            </ThemeProvider>
-          </PostHogProvider>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+            themes={["light", "dark", "colourful", "t3chat", "claudedark", "claudelight", "neutrallight", "neutraldark"]}
+          >
+            {children}
+          </ThemeProvider>
         </DataStreamProvider>
       </UserProvider>
     </QueryClientProvider>

@@ -1,42 +1,93 @@
 import 'server-only';
 
-import { and, asc, desc, eq, gt, gte, inArray, lt, type SQL } from 'drizzle-orm';
+import { cache } from 'react';
+import { and, asc, desc, eq, gt, gte, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import {
   user,
   chat,
   type User,
   message,
   type Message,
-  type Chat,
   stream,
   extremeSearchUsage,
+  anthropicUsage,
+  googleUsage,
   messageUsage,
+  agentModeUsageEvents,
   customInstructions,
-  payment,
+  userPreferences,
+  dodosubscription,
   lookout,
+  userMcpServer,
+  buildSession,
 } from './schema';
 import { ChatSDKError } from '../errors';
-import { db } from './index'; // Use unified database connection
-import { getDodoPayments, setDodoPayments, getDodoProStatus, setDodoProStatus } from '../performance-cache';
+import { db, maindb } from './index';
+import { getDodoSubscriptions, setDodoSubscriptions, getDodoProStatus, setDodoProStatus } from '../performance-cache';
+import { all } from 'better-all';
+import { getBetterAllOptions } from '@/lib/better-all';
 
 type VisibilityType = 'public' | 'private';
+type DodoSubscriptionRow = typeof dodosubscription.$inferSelect;
 
-export async function getUser(email: string): Promise<Array<User>> {
+function getValidDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+
+  const parsedDate = new Date(value);
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+
+function isActiveDodoSubscriptionRecord(
+  subscriptionRow: {
+    currentPeriodEnd: Date | string | null;
+    status: string;
+    cancelAtPeriodEnd: boolean | null;
+  },
+  now: Date,
+): boolean {
+  const periodEnd = getValidDate(subscriptionRow.currentPeriodEnd);
+  const isWithinPaidPeriod = !periodEnd || periodEnd > now;
+
+  if (!isWithinPaidPeriod) return false;
+  if (subscriptionRow.status === 'active') return true;
+  if (subscriptionRow.status === 'cancelled' && subscriptionRow.cancelAtPeriodEnd === true) return true;
+
+  return false;
+}
+
+async function getCachedOrFreshDodoSubscriptions(userId: string) {
+  const cachedSubscriptions = getDodoSubscriptions(userId);
+  if (cachedSubscriptions) return cachedSubscriptions as DodoSubscriptionRow[];
+
+  const subscriptions = await maindb
+    .select()
+    .from(dodosubscription)
+    .where(eq(dodosubscription.userId, userId))
+    .orderBy(desc(dodosubscription.createdAt));
+
+  setDodoSubscriptions(userId, subscriptions);
+  return subscriptions;
+}
+
+// Cache user lookups for the duration of the request
+export const getUser = cache(async (email: string): Promise<Array<User>> => {
   try {
-    return await db.select().from(user).where(eq(user.email, email)).$withCache();
+    return await db.select().from(user).where(eq(user.email, email)).limit(1);
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to get user by email');
   }
-}
+});
 
-export async function getUserById(id: string): Promise<User | null> {
+// Cache user by ID lookups for the duration of the request
+export const getUserById = cache(async (id: string): Promise<User | null> => {
   try {
-    const [selectedUser] = await db.select().from(user).where(eq(user.id, id)).$withCache();
+    const [selectedUser] = await db.select().from(user).where(eq(user.id, id)).limit(1);
     return selectedUser || null;
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to get user by id');
   }
-}
+});
 
 export async function saveChat({
   id,
@@ -50,9 +101,8 @@ export async function saveChat({
   visibility: VisibilityType;
 }) {
   try {
-    return await db.insert(chat).values({
+    return await maindb.insert(chat).values({
       id,
-      createdAt: new Date(),
       userId,
       title,
       visibility,
@@ -64,11 +114,28 @@ export async function saveChat({
 
 export async function deleteChatById({ id }: { id: string }) {
   try {
-    await db.delete(message).where(eq(message.chatId, id));
-    await db.delete(stream).where(eq(stream.chatId, id));
+    // Use transaction to ensure atomicity - if chat deletion fails,
+    // message and stream deletions are rolled back
+    return await maindb.transaction(async (tx) => {
+      // Delete messages and streams in parallel within the transaction using better-all
+      await all(
+        {
+          deleteMessages: async function () {
+            await tx.delete(message).where(eq(message.chatId, id));
+            return true;
+          },
+          deleteStreams: async function () {
+            await tx.delete(stream).where(eq(stream.chatId, id));
+            return true;
+          },
+        },
+        getBetterAllOptions(),
+      );
 
-    const [chatsDeleted] = await db.delete(chat).where(eq(chat.id, id)).returning();
-    return chatsDeleted;
+      // Delete the chat and return the deleted record
+      const [chatsDeleted] = await tx.delete(chat).where(eq(chat.id, id)).returning();
+      return chatsDeleted;
+    });
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to delete chat by id');
   }
@@ -79,42 +146,86 @@ export async function getChatsByUserId({
   limit,
   startingAfter,
   endingBefore,
+  cursorDate,
+  cursorIsPinned,
 }: {
   id: string;
   limit: number;
   startingAfter: string | null;
   endingBefore: string | null;
+  cursorDate?: string | null;
+  cursorIsPinned?: boolean | null;
 }) {
   try {
     const extendedLimit = limit + 1;
 
+    // Select only necessary columns for better performance
     const query = (whereCondition?: SQL<any>) =>
-      db
-        .select()
+      maindb
+        .select({
+          id: chat.id,
+          userId: chat.userId,
+          title: chat.title,
+          createdAt: chat.createdAt,
+          updatedAt: chat.updatedAt,
+          isPinned: chat.isPinned,
+          visibility: chat.visibility,
+        })
         .from(chat)
         .where(whereCondition ? and(whereCondition, eq(chat.userId, id)) : eq(chat.userId, id))
-        .orderBy(desc(chat.createdAt))
-        .limit(extendedLimit)
-        .$withCache();
+        .orderBy(desc(chat.isPinned), desc(chat.updatedAt), desc(chat.id))
+        .limit(extendedLimit);
 
-    let filteredChats: Array<Chat> = [];
+    let filteredChats: Array<any> = [];
 
     if (startingAfter) {
-      const [selectedChat] = await db.select().from(chat).where(eq(chat.id, startingAfter)).limit(1);
+      // If we have a direct timestamp cursor, skip the extra lookup
+      const cursorTimestamp = cursorDate ? new Date(cursorDate) : null;
+      if (cursorTimestamp) {
+        filteredChats = await query(gt(chat.updatedAt, cursorTimestamp));
+      } else {
+        const [selectedChat] = await maindb
+          .select({ updatedAt: chat.updatedAt })
+          .from(chat)
+          .where(eq(chat.id, startingAfter))
+          .limit(1);
 
-      if (!selectedChat) {
-        throw new ChatSDKError('not_found:database', `Chat with id ${startingAfter} not found`);
+        if (!selectedChat) {
+          throw new ChatSDKError('not_found:database', `Chat with id ${startingAfter} not found`);
+        }
+
+        filteredChats = await query(gt(chat.updatedAt, selectedChat.updatedAt));
       }
-
-      filteredChats = await query(gt(chat.createdAt, selectedChat.createdAt));
     } else if (endingBefore) {
-      const [selectedChat] = await db.select().from(chat).where(eq(chat.id, endingBefore)).limit(1);
+      // If we have a direct timestamp cursor, skip the extra lookup
+      const cursorTimestamp = cursorDate ? new Date(cursorDate) : null;
+      if (cursorTimestamp) {
+        if (cursorIsPinned) {
+          filteredChats = await query(
+            or(and(eq(chat.isPinned, true), lt(chat.updatedAt, cursorTimestamp)), eq(chat.isPinned, false)),
+          );
+        } else {
+          filteredChats = await query(and(eq(chat.isPinned, false), lt(chat.updatedAt, cursorTimestamp)));
+        }
+      } else {
+        const [selectedChat] = await maindb
+          .select({ updatedAt: chat.updatedAt, isPinned: chat.isPinned })
+          .from(chat)
+          .where(eq(chat.id, endingBefore))
+          .limit(1);
 
-      if (!selectedChat) {
-        throw new ChatSDKError('not_found:database', `Chat with id ${endingBefore} not found`);
+        if (!selectedChat) {
+          throw new ChatSDKError('not_found:database', `Chat with id ${endingBefore} not found`);
+        }
+
+        if (selectedChat.isPinned) {
+          filteredChats = await query(
+            or(and(eq(chat.isPinned, true), lt(chat.updatedAt, selectedChat.updatedAt)), eq(chat.isPinned, false)),
+          );
+        } else {
+          filteredChats = await query(and(eq(chat.isPinned, false), lt(chat.updatedAt, selectedChat.updatedAt)));
+        }
       }
-
-      filteredChats = await query(lt(chat.createdAt, selectedChat.createdAt));
     } else {
       filteredChats = await query();
     }
@@ -130,18 +241,80 @@ export async function getChatsByUserId({
   }
 }
 
-export async function getChatById({ id }: { id: string }) {
+// Lightweight query for sidebar recent chats - minimal columns, no pagination cursor logic
+export async function getRecentChatsByUserId({ userId, limit = 8 }: { userId: string; limit?: number }): Promise<{
+  chats: Array<{
+    id: string;
+    title: string;
+    createdAt: Date;
+    updatedAt: Date;
+    isPinned: boolean;
+    visibility: 'public' | 'private';
+  }>;
+  hasMore: boolean;
+}> {
   try {
-    const [selectedChat] = await db.select().from(chat).where(eq(chat.id, id)).$withCache();
-    return selectedChat;
+    const extendedLimit = limit + 1;
+    // Use maindb (primary) so newly created chats appear immediately without replication lag
+    const results = await maindb
+      .select({
+        id: chat.id,
+        title: chat.title,
+        createdAt: chat.createdAt,
+        updatedAt: chat.updatedAt,
+        isPinned: chat.isPinned,
+        visibility: chat.visibility,
+      })
+      .from(chat)
+      .leftJoin(buildSession, eq(buildSession.chatId, chat.id))
+      .where(and(eq(chat.userId, userId), isNull(buildSession.chatId)))
+      .orderBy(desc(chat.isPinned), desc(chat.updatedAt), desc(chat.id))
+      .limit(extendedLimit);
+
+    const hasMore = results.length > limit;
+    return {
+      chats: hasMore ? results.slice(0, limit) : results,
+      hasMore,
+    };
   } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to get chat by id');
+    throw new ChatSDKError('bad_request:database', 'Failed to get recent chats by user id');
   }
 }
 
+// Lightweight version that only fetches id and userId for ownership validation - cached per request
+export const getChatByIdForValidation = cache(
+  async ({ id }: { id: string }): Promise<{ id: string; userId: string } | null> => {
+    try {
+      const [selectedChat] = await maindb
+        .select({ id: chat.id, userId: chat.userId })
+        .from(chat)
+        .where(eq(chat.id, id))
+        .limit(1);
+      return selectedChat || null;
+    } catch (error) {
+      throw new ChatSDKError('bad_request:database', 'Failed to get chat by id');
+    }
+  },
+);
+
+// Cache chat lookups for the duration of the request
+export const getChatById = cache(async ({ id }: { id: string }) => {
+  try {
+    console.log('🔍 [DB-DETAIL] getChatById: Starting query...');
+    const cacheQueryStart = Date.now();
+    // Use direct select instead of relational query for better performance
+    const [selectedChat] = await maindb.select().from(chat).where(eq(chat.id, id)).limit(1);
+    const cacheQueryTime = (Date.now() - cacheQueryStart) / 1000;
+    console.log(`⏱️  [DB-DETAIL] getChatById: Query (with cache) took ${cacheQueryTime.toFixed(2)}s`);
+    return selectedChat || null;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get chat by id');
+  }
+});
+
 export async function getChatWithUserById({ id }: { id: string }) {
   try {
-    const [result] = await db
+    const [result] = await maindb
       .select({
         id: chat.id,
         title: chat.title,
@@ -155,8 +328,7 @@ export async function getChatWithUserById({ id }: { id: string }) {
       })
       .from(chat)
       .innerJoin(user, eq(chat.userId, user.id))
-      .where(eq(chat.id, id))
-      .$withCache();
+      .where(eq(chat.id, id));
     return result;
   } catch (error) {
     console.log('Error getting chat with user by id', error);
@@ -165,39 +337,133 @@ export async function getChatWithUserById({ id }: { id: string }) {
 }
 
 export async function saveMessages({ messages }: { messages: Array<Message> }) {
+  if (!messages.length) return [];
+
   try {
-    return await db.insert(message).values(messages);
+    const insertBatchSize = 50;
+    const payloadBatchThresholdBytes = 256 * 1024;
+    const isSingleChat = messages.every((messageItem) => messageItem.chatId === messages[0].chatId);
+
+    let estimatedPayloadBytes = 0;
+    for (const messageItem of messages) {
+      estimatedPayloadBytes += Buffer.byteLength(JSON.stringify(messageItem.parts));
+      estimatedPayloadBytes += Buffer.byteLength(JSON.stringify(messageItem.attachments));
+      if (estimatedPayloadBytes >= payloadBatchThresholdBytes) break;
+    }
+
+    const shouldBatch =
+      messages.length > insertBatchSize &&
+      (messages.length > insertBatchSize * 2 || estimatedPayloadBytes >= payloadBatchThresholdBytes);
+
+    if (!shouldBatch) {
+      const insertResult = await maindb.insert(message).values(messages).onConflictDoNothing({ target: message.id });
+
+      if (isSingleChat) {
+        let latestMessageAt = messages[0].createdAt;
+
+        for (let index = 1; index < messages.length; index++) {
+          if (messages[index].createdAt > latestMessageAt) latestMessageAt = messages[index].createdAt;
+        }
+
+        await maindb
+          .update(chat)
+          .set({ updatedAt: latestMessageAt })
+          .where(and(eq(chat.id, messages[0].chatId), lt(chat.updatedAt, latestMessageAt)));
+
+        return insertResult;
+      }
+
+      const latestMessageAtByChatId = new Map<string, Date>();
+
+      for (const messageItem of messages) {
+        const existing = latestMessageAtByChatId.get(messageItem.chatId);
+        if (!existing || messageItem.createdAt > existing) {
+          latestMessageAtByChatId.set(messageItem.chatId, messageItem.createdAt);
+        }
+      }
+
+      await Promise.all(
+        Array.from(latestMessageAtByChatId.entries()).map(([chatId, latestMessageAt]) =>
+          maindb
+            .update(chat)
+            .set({ updatedAt: latestMessageAt })
+            .where(and(eq(chat.id, chatId), lt(chat.updatedAt, latestMessageAt))),
+        ),
+      );
+
+      return insertResult;
+    }
+
+    // Large multi-row payloads are safer to split into smaller inserts.
+    return await maindb.transaction(async (tx) => {
+      let lastInsertResult = await tx
+        .insert(message)
+        .values(messages.slice(0, insertBatchSize))
+        .onConflictDoNothing({ target: message.id });
+
+      for (let index = insertBatchSize; index < messages.length; index += insertBatchSize) {
+        const messageBatch = messages.slice(index, index + insertBatchSize);
+        lastInsertResult = await tx.insert(message).values(messageBatch).onConflictDoNothing({ target: message.id });
+      }
+
+      if (isSingleChat) {
+        let latestMessageAt = messages[0].createdAt;
+
+        for (let index = 1; index < messages.length; index++) {
+          if (messages[index].createdAt > latestMessageAt) latestMessageAt = messages[index].createdAt;
+        }
+
+        await tx
+          .update(chat)
+          .set({ updatedAt: latestMessageAt })
+          .where(and(eq(chat.id, messages[0].chatId), lt(chat.updatedAt, latestMessageAt)));
+
+        return lastInsertResult;
+      }
+
+      const latestMessageAtByChatId = new Map<string, Date>();
+
+      for (const messageItem of messages) {
+        const existing = latestMessageAtByChatId.get(messageItem.chatId);
+        if (!existing || messageItem.createdAt > existing) {
+          latestMessageAtByChatId.set(messageItem.chatId, messageItem.createdAt);
+        }
+      }
+
+      for (const [chatId, latestMessageAt] of latestMessageAtByChatId.entries()) {
+        await tx
+          .update(chat)
+          .set({ updatedAt: latestMessageAt })
+          .where(and(eq(chat.id, chatId), lt(chat.updatedAt, latestMessageAt)));
+      }
+
+      return lastInsertResult;
+    });
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to save messages');
   }
 }
 
-export async function getMessagesByChatId({
-  id,
-  limit = 50,
-  offset = 0,
-}: {
-  id: string;
-  limit?: number;
-  offset?: number;
-}) {
-  try {
-    return await db
-      .select()
-      .from(message)
-      .where(eq(message.chatId, id))
-      .orderBy(asc(message.createdAt))
-      .limit(limit)
-      .offset(offset)
-      .$withCache();
-  } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to get messages by chat id');
-  }
-}
+// Cache message lookups for the duration of the request
+export const getMessagesByChatId = cache(
+  async ({ id, limit = 50, offset = 0 }: { id: string; limit?: number; offset?: number }) => {
+    try {
+      return await maindb
+        .select()
+        .from(message)
+        .where(eq(message.chatId, id))
+        .orderBy(asc(message.createdAt), asc(message.id))
+        .limit(limit)
+        .offset(offset);
+    } catch (error) {
+      throw new ChatSDKError('bad_request:database', 'Failed to get messages by chat id');
+    }
+  },
+);
 
 export async function getMessageById({ id }: { id: string }) {
   try {
-    return await db.select().from(message).where(eq(message.id, id));
+    return await maindb.select().from(message).where(eq(message.id, id)).limit(1);
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to get message by id');
   }
@@ -205,16 +471,9 @@ export async function getMessageById({ id }: { id: string }) {
 
 export async function deleteMessagesByChatIdAfterTimestamp({ chatId, timestamp }: { chatId: string; timestamp: Date }) {
   try {
-    const messagesToDelete = await db
-      .select({ id: message.id })
-      .from(message)
-      .where(and(eq(message.chatId, chatId), gte(message.createdAt, timestamp)));
-
-    const messageIds = messagesToDelete.map((message) => message.id);
-
-    if (messageIds.length > 0) {
-      return await db.delete(message).where(and(eq(message.chatId, chatId), inArray(message.id, messageIds)));
-    }
+    // Direct delete without intermediate query - more efficient and atomic
+    // This prevents race conditions where messages could be inserted between select and delete
+    return await maindb.delete(message).where(and(eq(message.chatId, chatId), gte(message.createdAt, timestamp)));
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to delete messages by chat id after timestamp');
   }
@@ -223,22 +482,44 @@ export async function deleteMessagesByChatIdAfterTimestamp({ chatId, timestamp }
 export async function deleteTrailingMessages({ id }: { id: string }) {
   const [message] = await getMessageById({ id });
 
+  if (!message) {
+    throw new ChatSDKError('not_found:database', `Message with id ${id} not found`);
+  }
+
   await deleteMessagesByChatIdAfterTimestamp({
     chatId: message.chatId,
     timestamp: message.createdAt,
   });
 }
 
-export async function updateChatVisiblityById({
+export async function updateChatVisibilityById({
   chatId,
   visibility,
 }: {
   chatId: string;
   visibility: 'private' | 'public';
 }) {
+  console.log('🔄 updateChatVisibilityById called with:', { chatId, visibility });
+
   try {
-    return await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
+    console.log('📡 Executing database update for chat visibility');
+    const result = await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
+    console.log('✅ Database update successful, result:', result);
+
+    // Return a consistent, serializable structure
+    return {
+      success: true,
+      rowCount: result.rowCount || 0,
+      chatId,
+      visibility,
+    };
   } catch (error) {
+    console.error('❌ Database error in updateChatVisibilityById:', {
+      chatId,
+      visibility,
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     throw new ChatSDKError('bad_request:database', 'Failed to update chat visibility by id');
   }
 }
@@ -253,6 +534,15 @@ export async function updateChatTitleById({ chatId, title }: { chatId: string; t
     return updatedChat;
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to update chat title by id');
+  }
+}
+
+export async function updateChatPinnedById({ chatId, isPinned }: { chatId: string; isPinned: boolean }) {
+  try {
+    const [updatedChat] = await db.update(chat).set({ isPinned }).where(eq(chat.id, chatId)).returning();
+    return updatedChat;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to update chat pinned state by id');
   }
 }
 
@@ -272,9 +562,49 @@ export async function createStreamId({ streamId, chatId }: { streamId: string; c
   }
 }
 
-export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
+/**
+ * Creates a new chat and its first stream ID in a single DB round-trip using a CTE.
+ * Saves one RTT compared to two sequential inserts (saveChat then createStreamId).
+ */
+export async function saveNewChatWithStream({
+  chatId,
+  userId,
+  title,
+  visibility,
+  streamId,
+}: {
+  chatId: string;
+  userId: string;
+  title: string;
+  visibility: 'public' | 'private';
+  streamId: string;
+}) {
+  const now = new Date();
+  const safeVisibility: 'public' | 'private' = visibility === 'public' ? 'public' : 'private';
   try {
-    const streamIds = await db
+    await maindb.execute(
+      sql`WITH new_chat AS (
+        INSERT INTO "chat" (id, "userId", title, visibility, created_at, updated_at)
+        VALUES (${chatId}, ${userId}, ${title}, ${safeVisibility}, ${now}, ${now})
+        RETURNING id
+      )
+      INSERT INTO "stream" (id, "chatId", "createdAt")
+      SELECT ${streamId}, id, ${now} FROM new_chat`,
+    );
+  } catch (error) {
+    console.error('[saveNewChatWithStream] DB error:', error);
+    // Fallback: two sequential inserts
+    await maindb
+      .insert(chat)
+      .values({ id: chatId, userId, title, visibility: safeVisibility, createdAt: now, updatedAt: now });
+    await maindb.insert(stream).values({ id: streamId, chatId, createdAt: now });
+  }
+}
+
+// Cache stream ID lookups for the duration of the request
+export const getStreamIdsByChatId = cache(async ({ chatId }: { chatId: string }) => {
+  try {
+    const streamIds = await maindb
       .select({ id: stream.id })
       .from(stream)
       .where(eq(stream.chatId, chatId))
@@ -284,6 +614,44 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
     return streamIds.map(({ id }) => id);
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to get stream ids by chat id');
+  }
+});
+
+/**
+ * Returns the most recently created stream ID for a chat.
+ * Uses maindb to avoid replica lag when guarding concurrent writes.
+ */
+export async function getLatestStreamIdByChatId({ chatId }: { chatId: string }): Promise<string | null> {
+  try {
+    const [latestStream] = await maindb
+      .select({ id: stream.id })
+      .from(stream)
+      .where(eq(stream.chatId, chatId))
+      .orderBy(desc(stream.createdAt), desc(stream.id))
+      .limit(1);
+
+    return latestStream?.id ?? null;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get latest stream id by chat id');
+  }
+}
+
+/**
+ * Returns the latest user message ID for a chat.
+ * Uses maindb to avoid replica lag for race-condition guards.
+ */
+export async function getLatestUserMessageIdByChatId({ chatId }: { chatId: string }): Promise<string | null> {
+  try {
+    const [latestUserMessage] = await maindb
+      .select({ id: message.id })
+      .from(message)
+      .where(and(eq(message.chatId, chatId), eq(message.role, 'user')))
+      .orderBy(desc(message.createdAt), desc(message.id))
+      .limit(1);
+
+    return latestUserMessage?.id ?? null;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get latest user message id by chat id');
   }
 }
 
@@ -298,7 +666,7 @@ export async function getExtremeSearchUsageByUserId({ userId }: { userId: string
     const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
     startOfNextMonth.setHours(0, 0, 0, 0);
 
-    const [usage] = await db
+    const [usage] = await maindb
       .select()
       .from(extremeSearchUsage)
       .where(
@@ -318,37 +686,37 @@ export async function getExtremeSearchUsageByUserId({ userId }: { userId: string
 
 export async function incrementExtremeSearchUsage({ userId }: { userId: string }) {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Start of current month for the date key
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
 
     // End of current month for monthly reset
-    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    const endOfMonth = new Date(startOfMonth.getFullYear(), startOfMonth.getMonth() + 1, 1);
     endOfMonth.setHours(0, 0, 0, 0);
 
-    const existingUsage = await getExtremeSearchUsageByUserId({ userId });
-
-    if (existingUsage) {
-      const [updatedUsage] = await db
-        .update(extremeSearchUsage)
-        .set({
-          searchCount: existingUsage.searchCount + 1,
+    // Atomic upsert: insert or increment if exists
+    // Uses ON CONFLICT on the unique (userId, date) constraint
+    const [result] = await db
+      .insert(extremeSearchUsage)
+      .values({
+        userId,
+        searchCount: 1,
+        date: startOfMonth,
+        resetAt: endOfMonth,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [extremeSearchUsage.userId, extremeSearchUsage.date],
+        set: {
+          searchCount: sql`${extremeSearchUsage.searchCount} + 1`,
           updatedAt: new Date(),
-        })
-        .where(eq(extremeSearchUsage.id, existingUsage.id))
-        .returning();
-      return updatedUsage;
-    } else {
-      const [newUsage] = await db
-        .insert(extremeSearchUsage)
-        .values({
-          userId,
-          searchCount: 1,
-          date: today,
-          resetAt: endOfMonth,
-        })
-        .returning();
-      return newUsage;
-    }
+        },
+      })
+      .returning();
+
+    return result;
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to increment extreme search usage');
   }
@@ -364,6 +732,165 @@ export async function getExtremeSearchCount({ userId }: { userId: string }): Pro
   }
 }
 
+export async function getAnthropicUsageByUserId({ userId }: { userId: string }) {
+  try {
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    const day = startOfWeek.getDay();
+    startOfWeek.setDate(startOfWeek.getDate() - day);
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const startOfNextWeek = new Date(startOfWeek);
+    startOfNextWeek.setDate(startOfNextWeek.getDate() + 7);
+    startOfNextWeek.setHours(0, 0, 0, 0);
+
+    const [usage] = await maindb
+      .select()
+      .from(anthropicUsage)
+      .where(
+        and(
+          eq(anthropicUsage.userId, userId),
+          gte(anthropicUsage.date, startOfWeek),
+          lt(anthropicUsage.date, startOfNextWeek),
+        ),
+      )
+      .limit(1);
+
+    return usage;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get anthropic usage');
+  }
+}
+
+export async function incrementAnthropicUsage({ userId, model }: { userId: string; model?: string | null }) {
+  try {
+    const startOfWeek = new Date();
+    const day = startOfWeek.getDay();
+    startOfWeek.setDate(startOfWeek.getDate() - day);
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(endOfWeek.getDate() + 7);
+    endOfWeek.setHours(0, 0, 0, 0);
+
+    db.delete(anthropicUsage)
+      .where(and(eq(anthropicUsage.userId, userId), lt(anthropicUsage.date, startOfWeek)))
+      .catch((err) => console.error('Failed to clean up old anthropic usage:', err));
+
+    const [result] = await db
+      .insert(anthropicUsage)
+      .values({
+        userId,
+        usageCount: 1,
+        date: startOfWeek,
+        resetAt: endOfWeek,
+        metadata: model ? { lastModel: model } : null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [anthropicUsage.userId, anthropicUsage.date],
+        set: {
+          usageCount: sql`${anthropicUsage.usageCount} + 1`,
+          metadata: model ? { lastModel: model } : sql`${anthropicUsage.metadata}`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+
+    return result;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to increment anthropic usage');
+  }
+}
+
+export async function getAnthropicUsageCount({ userId }: { userId: string }): Promise<number> {
+  try {
+    const usage = await getAnthropicUsageByUserId({ userId });
+    return usage?.usageCount || 0;
+  } catch (error) {
+    console.error('Error getting anthropic usage count:', error);
+    return 0;
+  }
+}
+
+export async function getGoogleUsageByUserId({ userId }: { userId: string }) {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    startOfNextMonth.setHours(0, 0, 0, 0);
+
+    const [usage] = await maindb
+      .select()
+      .from(googleUsage)
+      .where(
+        and(
+          eq(googleUsage.userId, userId),
+          gte(googleUsage.date, startOfMonth),
+          lt(googleUsage.date, startOfNextMonth),
+        ),
+      )
+      .limit(1);
+
+    return usage;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get google usage');
+  }
+}
+
+export async function incrementGoogleUsage({ userId, model }: { userId: string; model?: string | null }) {
+  try {
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const startOfNextMonth = new Date(startOfMonth.getFullYear(), startOfMonth.getMonth() + 1, 1);
+    startOfNextMonth.setHours(0, 0, 0, 0);
+
+    db.delete(googleUsage)
+      .where(and(eq(googleUsage.userId, userId), lt(googleUsage.date, startOfMonth)))
+      .catch((err) => console.error('Failed to clean up old google usage:', err));
+
+    const [result] = await db
+      .insert(googleUsage)
+      .values({
+        userId,
+        usageCount: 1,
+        date: startOfMonth,
+        resetAt: startOfNextMonth,
+        metadata: model ? { lastModel: model } : null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [googleUsage.userId, googleUsage.date],
+        set: {
+          usageCount: sql`${googleUsage.usageCount} + 1`,
+          metadata: model ? { lastModel: model } : sql`${googleUsage.metadata}`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+
+    return result;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to increment google usage');
+  }
+}
+
+export async function getGoogleUsageCount({ userId }: { userId: string }): Promise<number> {
+  try {
+    const usage = await getGoogleUsageByUserId({ userId });
+    return usage?.usageCount || 0;
+  } catch (error) {
+    console.error('Error getting google usage count:', error);
+    return 0;
+  }
+}
+
 export async function getMessageUsageByUserId({ userId }: { userId: string }) {
   try {
     const now = new Date();
@@ -375,7 +902,7 @@ export async function getMessageUsageByUserId({ userId }: { userId: string }) {
     const startOfNextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     startOfNextDay.setHours(0, 0, 0, 0);
 
-    const [usage] = await db
+    const [usage] = await maindb
       .select()
       .from(messageUsage)
       .where(
@@ -398,33 +925,33 @@ export async function incrementMessageUsage({ userId }: { userId: string }) {
     const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
     endOfDay.setHours(0, 0, 0, 0);
 
-    // Clean up previous day entries for this user
-    await db.delete(messageUsage).where(and(eq(messageUsage.userId, userId), lt(messageUsage.date, today)));
+    // Clean up previous day entries for this user (non-blocking, errors won't fail the increment)
+    db.delete(messageUsage)
+      .where(and(eq(messageUsage.userId, userId), lt(messageUsage.date, today)))
+      .catch((err) => console.error('Failed to clean up old message usage:', err));
 
-    const existingUsage = await getMessageUsageByUserId({ userId });
-
-    if (existingUsage) {
-      const [updatedUsage] = await db
-        .update(messageUsage)
-        .set({
-          messageCount: existingUsage.messageCount + 1,
+    // Atomic upsert: insert or increment if exists
+    // Uses ON CONFLICT on the unique (userId, date) constraint
+    const [result] = await db
+      .insert(messageUsage)
+      .values({
+        userId,
+        messageCount: 1,
+        date: today,
+        resetAt: endOfDay,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [messageUsage.userId, messageUsage.date],
+        set: {
+          messageCount: sql`${messageUsage.messageCount} + 1`,
           updatedAt: new Date(),
-        })
-        .where(eq(messageUsage.id, existingUsage.id))
-        .returning();
-      return updatedUsage;
-    } else {
-      const [newUsage] = await db
-        .insert(messageUsage)
-        .values({
-          userId,
-          messageCount: 1,
-          date: today,
-          resetAt: endOfDay,
-        })
-        .returning();
-      return newUsage;
-    }
+        },
+      })
+      .returning();
+
+    return result;
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to increment message usage');
   }
@@ -440,63 +967,155 @@ export async function getMessageCount({ userId }: { userId: string }): Promise<n
   }
 }
 
+/**
+ * Fetches message count (daily), extreme search count (monthly), and anthropic count (daily)
+ * in one parallel round-trip. Use for critical-checks path to avoid sequential awaits.
+ */
+export async function getMessageCountAndExtremeSearchByUserId({
+  userId,
+}: {
+  userId: string;
+}): Promise<{ messageCount: number; extremeSearchCount: number; anthropicCount: number; googleCount: number }> {
+  try {
+    const { messageUsageRow, extremeUsageRow, anthropicUsageRow, googleUsageRow } = await all(
+      {
+        async messageUsageRow() {
+          return getMessageUsageByUserId({ userId });
+        },
+        async extremeUsageRow() {
+          return getExtremeSearchUsageByUserId({ userId });
+        },
+        async anthropicUsageRow() {
+          return getAnthropicUsageByUserId({ userId });
+        },
+        async googleUsageRow() {
+          return getGoogleUsageByUserId({ userId });
+        },
+      },
+      getBetterAllOptions(),
+    );
+    return {
+      messageCount: messageUsageRow?.messageCount ?? 0,
+      extremeSearchCount: extremeUsageRow?.searchCount ?? 0,
+      anthropicCount: anthropicUsageRow?.usageCount ?? 0,
+      googleCount: googleUsageRow?.usageCount ?? 0,
+    };
+  } catch (error) {
+    console.error('Error getting batched usage counts:', error);
+    return { messageCount: 0, extremeSearchCount: 0, anthropicCount: 0, googleCount: 0 };
+  }
+}
+
 export async function getHistoricalUsageData({ userId, months = 6 }: { userId: string; months?: number }) {
   try {
-    // Get actual message data for the specified months from message table
-    const totalDays = months * 30; // Approximately 30 days per month
+    // Get aggregated message counts by date using SQL aggregation
+    // This is much more efficient than fetching all messages and grouping in JS
+    const totalDays = months * 30;
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setDate(endDate.getDate() - (totalDays - 1)); // totalDays - 1 + today
+    startDate.setDate(endDate.getDate() - (totalDays - 1));
 
-    // Get all user messages from their chats in the date range
-    const historicalMessages = await db
+    // Use SQL aggregation to count messages per day
+    const dailyCounts = await maindb
       .select({
-        createdAt: message.createdAt,
-        role: message.role,
+        date: sql<string>`DATE(${message.createdAt})`.as('date'),
+        messageCount: sql<number>`COUNT(*)::int`.as('message_count'),
       })
       .from(message)
       .innerJoin(chat, eq(message.chatId, chat.id))
       .where(
         and(
           eq(chat.userId, userId),
-          eq(message.role, 'user'), // Only count user messages, not assistant responses
+          eq(message.role, 'user'),
           gte(message.createdAt, startDate),
           lt(message.createdAt, endDate),
         ),
       )
-      .orderBy(asc(message.createdAt))
-      .$withCache();
+      .groupBy(sql`DATE(${message.createdAt})`)
+      .orderBy(sql`DATE(${message.createdAt})`);
 
-    // Group messages by date and count them
-    const dailyCounts = new Map<string, number>();
-
-    historicalMessages.forEach((msg) => {
-      const dateKey = msg.createdAt.toISOString().split('T')[0]; // Get YYYY-MM-DD format
-      dailyCounts.set(dateKey, (dailyCounts.get(dateKey) || 0) + 1);
-    });
-
-    // Convert to array format expected by the frontend
-    const result = Array.from(dailyCounts.entries()).map(([date, count]) => ({
-      date: new Date(date),
-      messageCount: count,
+    // Convert to the format expected by the frontend
+    return dailyCounts.map((row) => ({
+      date: new Date(row.date),
+      messageCount: row.messageCount,
     }));
-
-    return result;
   } catch (error) {
     console.error('Error getting historical usage data:', error);
     return [];
   }
 }
 
+export async function getAgentModeRequestCountForCurrentMonth({ userId }: { userId: string }): Promise<number> {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    startOfNextMonth.setHours(0, 0, 0, 0);
+
+    const [row] = await maindb
+      .select({
+        requestCount: sql<number>`COUNT(*)::int`.as('request_count'),
+      })
+      .from(agentModeUsageEvents)
+      .where(
+        and(
+          eq(agentModeUsageEvents.userId, userId),
+          gte(agentModeUsageEvents.date, startOfMonth),
+          lt(agentModeUsageEvents.date, startOfNextMonth),
+        ),
+      );
+
+    return row?.requestCount ?? 0;
+  } catch (error) {
+    console.error('Error getting agent mode request count:', error);
+    return 0;
+  }
+}
+
+export async function trackAgentModeUsageEventForMessage({
+  userId,
+  messageId,
+}: {
+  userId: string;
+  messageId: string;
+}): Promise<void> {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    startOfNextMonth.setHours(0, 0, 0, 0);
+
+    await maindb
+      .insert(agentModeUsageEvents)
+      .values({
+        userId,
+        messageId,
+        date: startOfMonth,
+        resetAt: startOfNextMonth,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing({
+        target: [agentModeUsageEvents.messageId],
+      });
+  } catch (error) {
+    // Usage tracking should never break builds; swallow and log.
+    console.error('Error tracking agent mode usage event:', error);
+  }
+}
+
 // Custom Instructions CRUD operations
 export async function getCustomInstructionsByUserId({ userId }: { userId: string }) {
   try {
-    const [instructions] = await db
+    const [instructions] = await maindb
       .select()
       .from(customInstructions)
       .where(eq(customInstructions.userId, userId))
-      .limit(1)
-      .$withCache();
+      .limit(1);
 
     return instructions;
   } catch (error) {
@@ -551,125 +1170,351 @@ export async function deleteCustomInstructions({ userId }: { userId: string }) {
   }
 }
 
-// Payment CRUD operations
-export async function getPaymentsByUserId({ userId }: { userId: string }) {
+// User Preferences CRUD operations
+export async function getUserPreferencesByUserId({ userId }: { userId: string }) {
   try {
-    // Check cache first
-    const cachedPayments = getDodoPayments(userId);
-    if (cachedPayments) {
-      return cachedPayments.sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    }
-
-    // Fetch from database and cache
-    const payments = await db
+    const [preferences] = await maindb
       .select()
-      .from(payment)
-      .where(eq(payment.userId, userId))
-      .orderBy(desc(payment.createdAt))
-      .$withCache();
-    setDodoPayments(userId, payments);
-    return payments;
+      .from(userPreferences)
+      .where(eq(userPreferences.userId, userId))
+      .limit(1);
+
+    return preferences || null;
   } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to get payments by user id');
+    console.error('Error getting user preferences:', error);
+    return null;
   }
 }
 
-export async function getPaymentById({ paymentId }: { paymentId: string }) {
+export async function upsertUserPreferences({
+  userId,
+  preferences,
+}: {
+  userId: string;
+  preferences: Partial<{
+    'scira-search-provider'?: 'exa' | 'parallel' | 'firecrawl';
+    'scira-extreme-search-model'?:
+      | 'scira-ext-1'
+      | 'scira-ext-2'
+      | 'scira-ext-4'
+      | 'scira-ext-5'
+      | 'scira-ext-6'
+      | 'scira-ext-7'
+      | 'scira-ext-8';
+    'scira-group-order'?: string[];
+    'scira-model-order-global'?: string[];
+    'scira-blur-personal-info'?: boolean;
+    'scira-custom-instructions-enabled'?: boolean;
+    'scira-scroll-to-latest-on-open'?: boolean;
+    'scira-location-metadata-enabled'?: boolean;
+    'scira-auto-router-enabled'?: boolean;
+    'scira-auto-router-config'?: {
+      routes: Array<{
+        name: string;
+        description: string;
+        model: string;
+      }>;
+    };
+  }>;
+}) {
   try {
-    const [selectedPayment] = await db.select().from(payment).where(eq(payment.id, paymentId));
-    return selectedPayment;
+    // Use transaction to ensure atomicity of read-modify-write
+    return await maindb.transaction(async (tx) => {
+      // Get existing preferences within transaction
+      const [existing] = await tx.select().from(userPreferences).where(eq(userPreferences.userId, userId)).limit(1);
+
+      const existingPrefs = existing?.preferences || {};
+
+      // Merge existing with new updates
+      const mergedPreferences = {
+        ...existingPrefs,
+        ...preferences,
+      };
+
+      if (existing) {
+        // Update existing record
+        const [updated] = await tx
+          .update(userPreferences)
+          .set({
+            preferences: mergedPreferences,
+            updatedAt: new Date(),
+          })
+          .where(eq(userPreferences.userId, userId))
+          .returning();
+        return updated;
+      } else {
+        // Insert new record
+        const [newPreferences] = await tx
+          .insert(userPreferences)
+          .values({
+            userId,
+            preferences: mergedPreferences,
+          })
+          .returning();
+        return newPreferences;
+      }
+    });
   } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to get payment by id');
+    throw new ChatSDKError('bad_request:database', 'Failed to upsert user preferences');
   }
 }
 
-export async function getSuccessfulPaymentsByUserId({ userId }: { userId: string }) {
+export interface UserMcpServerInput {
+  userId: string;
+  name: string;
+  transportType: 'http' | 'sse';
+  url: string;
+  authType: 'none' | 'bearer' | 'header' | 'oauth';
+  encryptedCredentials?: string | null;
+  oauthIssuerUrl?: string | null;
+  oauthAuthorizationUrl?: string | null;
+  oauthTokenUrl?: string | null;
+  oauthScopes?: string | null;
+  oauthClientId?: string | null;
+  oauthClientSecretEncrypted?: string | null;
+  oauthAccessTokenEncrypted?: string | null;
+  oauthRefreshTokenEncrypted?: string | null;
+  oauthAccessTokenExpiresAt?: Date | null;
+  oauthConnectedAt?: Date | null;
+  oauthError?: string | null;
+  isEnabled?: boolean;
+}
+
+export async function createUserMcpServer(input: UserMcpServerInput) {
   try {
-    return await db
+    const [created] = await maindb
+      .insert(userMcpServer)
+      .values({
+        userId: input.userId,
+        name: input.name,
+        transportType: input.transportType,
+        url: input.url,
+        authType: input.authType,
+        encryptedCredentials: input.encryptedCredentials ?? null,
+        oauthIssuerUrl: input.oauthIssuerUrl ?? null,
+        oauthAuthorizationUrl: input.oauthAuthorizationUrl ?? null,
+        oauthTokenUrl: input.oauthTokenUrl ?? null,
+        oauthScopes: input.oauthScopes ?? null,
+        oauthClientId: input.oauthClientId ?? null,
+        oauthClientSecretEncrypted: input.oauthClientSecretEncrypted ?? null,
+        oauthAccessTokenEncrypted: input.oauthAccessTokenEncrypted ?? null,
+        oauthRefreshTokenEncrypted: input.oauthRefreshTokenEncrypted ?? null,
+        oauthAccessTokenExpiresAt: input.oauthAccessTokenExpiresAt ?? null,
+        oauthConnectedAt: input.oauthConnectedAt ?? null,
+        oauthError: input.oauthError ?? null,
+        isEnabled: input.isEnabled ?? true,
+      })
+      .returning();
+
+    return created;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to create MCP server');
+  }
+}
+
+export async function getUserMcpServersByUserId({
+  userId,
+  enabledOnly = false,
+}: {
+  userId: string;
+  enabledOnly?: boolean;
+}) {
+  try {
+    return await maindb
       .select()
-      .from(payment)
-      .where(and(eq(payment.userId, userId), eq(payment.status, 'succeeded')))
-      .orderBy(desc(payment.createdAt))
-      .$withCache();
+      .from(userMcpServer)
+      .where(
+        enabledOnly
+          ? and(
+              eq(userMcpServer.userId, userId),
+              eq(userMcpServer.isEnabled, true),
+              // Skip OAuth servers that haven't completed authorization
+              or(
+                eq(userMcpServer.authType, 'none'),
+                eq(userMcpServer.authType, 'bearer'),
+                eq(userMcpServer.authType, 'header'),
+                and(eq(userMcpServer.authType, 'oauth'), isNotNull(userMcpServer.oauthConnectedAt)),
+              ),
+            )
+          : eq(userMcpServer.userId, userId),
+      )
+      .orderBy(desc(userMcpServer.createdAt));
   } catch (error) {
-    throw new ChatSDKError('bad_request:database', 'Failed to get successful payments by user id');
+    throw new ChatSDKError('bad_request:database', 'Failed to fetch MCP servers');
   }
 }
 
-export async function getTotalPaymentAmountByUserId({ userId }: { userId: string }) {
+export async function getUserMcpServerById({ id, userId }: { id: string; userId: string }) {
   try {
-    const payments = await getSuccessfulPaymentsByUserId({ userId });
-    return payments.reduce((total, payment) => total + (payment.totalAmount || 0), 0);
+    const [server] = await maindb
+      .select()
+      .from(userMcpServer)
+      .where(and(eq(userMcpServer.id, id), eq(userMcpServer.userId, userId)))
+      .limit(1);
+    return server ?? null;
   } catch (error) {
-    console.error('Error getting total payment amount:', error);
+    throw new ChatSDKError('bad_request:database', 'Failed to fetch MCP server');
+  }
+}
+
+export async function updateUserMcpServer({
+  id,
+  userId,
+  values,
+}: {
+  id: string;
+  userId: string;
+  values: Partial<{
+    name: string;
+    transportType: 'http' | 'sse';
+    url: string;
+    authType: 'none' | 'bearer' | 'header' | 'oauth';
+    encryptedCredentials: string | null;
+    oauthIssuerUrl: string | null;
+    oauthAuthorizationUrl: string | null;
+    oauthTokenUrl: string | null;
+    oauthScopes: string | null;
+    oauthClientId: string | null;
+    oauthClientSecretEncrypted: string | null;
+    oauthAccessTokenEncrypted: string | null;
+    oauthRefreshTokenEncrypted: string | null;
+    oauthAccessTokenExpiresAt: Date | null;
+    oauthConnectedAt: Date | null;
+    oauthError: string | null;
+    isEnabled: boolean;
+    disabledTools: string[];
+    lastTestedAt: Date | null;
+    lastError: string | null;
+  }>;
+}) {
+  try {
+    const [updated] = await maindb
+      .update(userMcpServer)
+      .set({
+        ...values,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(userMcpServer.id, id), eq(userMcpServer.userId, userId)))
+      .returning();
+    return updated ?? null;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to update MCP server');
+  }
+}
+
+export async function deleteUserMcpServer({ id, userId }: { id: string; userId: string }) {
+  try {
+    const [deleted] = await maindb
+      .delete(userMcpServer)
+      .where(and(eq(userMcpServer.id, id), eq(userMcpServer.userId, userId)))
+      .returning();
+    return deleted ?? null;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to delete MCP server');
+  }
+}
+
+// Dodo Subscription CRUD operations
+export async function getDodoSubscriptionsByUserId({ userId }: { userId: string }) {
+  try {
+    return await getCachedOrFreshDodoSubscriptions(userId);
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get Dodo subscriptions by user id');
+  }
+}
+
+export async function getDodoSubscriptionById({ subscriptionId }: { subscriptionId: string }) {
+  try {
+    const [selectedSubscription] = await maindb
+      .select()
+      .from(dodosubscription)
+      .where(eq(dodosubscription.id, subscriptionId))
+      .limit(1);
+    return selectedSubscription;
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get Dodo subscription by id');
+  }
+}
+
+export async function getActiveDodoSubscriptionsByUserId({ userId }: { userId: string }) {
+  try {
+    const allSubscriptions = await getCachedOrFreshDodoSubscriptions(userId);
+    const now = new Date();
+    return allSubscriptions
+      .filter((subscriptionRow: DodoSubscriptionRow) => isActiveDodoSubscriptionRecord(subscriptionRow, now))
+      .toSorted((subscriptionA: DodoSubscriptionRow, subscriptionB: DodoSubscriptionRow) => {
+        const periodEndA = getValidDate(subscriptionA.currentPeriodEnd)?.getTime() ?? 0;
+        const periodEndB = getValidDate(subscriptionB.currentPeriodEnd)?.getTime() ?? 0;
+
+        return periodEndB - periodEndA;
+      });
+  } catch (error) {
+    throw new ChatSDKError('bad_request:database', 'Failed to get active Dodo subscriptions by user id');
+  }
+}
+
+export async function getTotalDodoSubscriptionAmountByUserId({ userId }: { userId: string }) {
+  try {
+    const subscriptions = await getActiveDodoSubscriptionsByUserId({ userId });
+    return subscriptions.reduce((total: number, sub: DodoSubscriptionRow) => total + (sub.amount || 0), 0);
+  } catch (error) {
+    console.error('Error getting total subscription amount:', error);
     return 0;
   }
 }
 
-export async function hasSuccessfulDodoPayment({ userId }: { userId: string }) {
+export async function hasActiveDodoSubscription({ userId }: { userId: string }) {
   try {
     // Check cache first for overall status
     const cachedStatus = getDodoProStatus(userId);
     if (cachedStatus !== null) {
-      return cachedStatus.hasPayments || false;
+      // Backward compatibility: handle both old (hasSubscriptions) and new (isProUser) cache formats
+      return cachedStatus.isProUser ?? cachedStatus.hasSubscriptions ?? false;
     }
 
-    // Fallback to database query
-    const payments = await getSuccessfulPaymentsByUserId({ userId });
-    const hasPayments = payments.length > 0;
+    // Use maindb to avoid replication lag and getActiveDodoSubscriptionsByUserId
+    // which now handles cancelled subscriptions correctly
+    const subscriptions = await getActiveDodoSubscriptionsByUserId({ userId });
+    const hasSubscriptions = subscriptions.length > 0;
 
     // Cache the result
-    const statusData = { hasPayments, isProUser: false };
+    const statusData = { hasSubscriptions, isProUser: hasSubscriptions };
     setDodoProStatus(userId, statusData);
 
-    return hasPayments;
+    return hasSubscriptions;
   } catch (error) {
-    console.error('Error checking DodoPayments status:', error);
+    console.error('Error checking Dodo Subscription status:', error);
     return false;
   }
 }
 
-export async function isDodoPaymentsProExpired({ userId }: { userId: string }) {
+export async function isDodoSubscriptionExpired({ userId }: { userId: string }) {
   try {
-    const payments = await getSuccessfulPaymentsByUserId({ userId });
-
-    if (payments.length === 0) {
-      return true; // No payments = expired
-    }
-
-    // Get the most recent successful payment
-    const mostRecentPayment = payments.sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    )[0];
-
-    // Check if it's older than 1 month
-    const paymentDate = new Date(mostRecentPayment.createdAt);
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-
-    return paymentDate <= oneMonthAgo;
+    const subscriptions = await getActiveDodoSubscriptionsByUserId({ userId });
+    return subscriptions.length === 0;
   } catch (error) {
-    console.error('Error checking DodoPayments expiration:', error);
+    console.error('Error checking Dodo Subscription expiration:', error);
     return true;
   }
 }
 
-export async function getDodoPaymentsExpirationInfo({ userId }: { userId: string }) {
+export async function getDodoSubscriptionExpirationInfo({ userId }: { userId: string }) {
   try {
-    const payments = await getSuccessfulPaymentsByUserId({ userId });
+    const subscriptions = await getActiveDodoSubscriptionsByUserId({ userId });
 
-    if (payments.length === 0) {
+    if (subscriptions.length === 0) {
       return null;
     }
 
-    // Get the most recent successful payment
-    const mostRecentPayment = payments.sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    )[0];
+    const mostRecentSubscription = subscriptions.find(
+      (subscriptionRow: DodoSubscriptionRow) => subscriptionRow.currentPeriodEnd,
+    );
+    if (!mostRecentSubscription) {
+      return null;
+    }
 
-    // Calculate expiration date (1 month from payment)
-    const expirationDate = new Date(mostRecentPayment.createdAt);
-    expirationDate.setMonth(expirationDate.getMonth() + 1);
+    const expirationDate = getValidDate(mostRecentSubscription.currentPeriodEnd);
+    if (!expirationDate) return null;
 
     // Calculate days until expiration
     const now = new Date();
@@ -677,14 +1522,14 @@ export async function getDodoPaymentsExpirationInfo({ userId }: { userId: string
     const daysUntilExpiration = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
     return {
-      paymentDate: mostRecentPayment.createdAt,
+      subscriptionDate: mostRecentSubscription.createdAt,
       expirationDate,
       daysUntilExpiration,
       isExpired: daysUntilExpiration <= 0,
       isExpiringSoon: daysUntilExpiration <= 7 && daysUntilExpiration > 0,
     };
   } catch (error) {
-    console.error('Error getting DodoPayments expiration info:', error);
+    console.error('Error getting Dodo Subscription expiration info:', error);
     return null;
   }
 }
@@ -699,6 +1544,7 @@ export async function createLookout({
   timezone,
   nextRunAt,
   qstashScheduleId,
+  searchMode = 'extreme',
 }: {
   userId: string;
   title: string;
@@ -708,6 +1554,7 @@ export async function createLookout({
   timezone: string;
   nextRunAt: Date;
   qstashScheduleId?: string;
+  searchMode?: string;
 }) {
   try {
     const [newLookout] = await db
@@ -721,6 +1568,7 @@ export async function createLookout({
         timezone,
         nextRunAt,
         qstashScheduleId,
+        searchMode,
       })
       .returning();
 
@@ -732,18 +1580,20 @@ export async function createLookout({
   }
 }
 
-export async function getLookoutsByUserId({ userId }: { userId: string }) {
+// Cache lookout queries for the duration of the request
+export const getLookoutsByUserId = cache(async ({ userId }: { userId: string }) => {
   try {
-    return await db.select().from(lookout).where(eq(lookout.userId, userId)).orderBy(desc(lookout.createdAt));
+    return await maindb.select().from(lookout).where(eq(lookout.userId, userId)).orderBy(desc(lookout.createdAt));
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to get lookouts by user id');
   }
-}
+});
 
-export async function getLookoutById({ id }: { id: string }) {
+// Cache individual lookout lookups for the duration of the request
+export const getLookoutById = cache(async ({ id }: { id: string }) => {
   try {
     console.log('🔍 Looking up lookout with ID:', id);
-    const [selectedLookout] = await db.select().from(lookout).where(eq(lookout.id, id));
+    const [selectedLookout] = await maindb.select().from(lookout).where(eq(lookout.id, id)).limit(1);
 
     if (selectedLookout) {
       console.log('✅ Found lookout:', selectedLookout.id, selectedLookout.title);
@@ -756,7 +1606,7 @@ export async function getLookoutById({ id }: { id: string }) {
     console.error('❌ Error fetching lookout by ID:', id, error);
     throw new ChatSDKError('bad_request:database', 'Failed to get lookout by id');
   }
-}
+});
 
 export async function updateLookout({
   id,
@@ -767,6 +1617,7 @@ export async function updateLookout({
   timezone,
   nextRunAt,
   qstashScheduleId,
+  searchMode,
 }: {
   id: string;
   title?: string;
@@ -776,6 +1627,7 @@ export async function updateLookout({
   timezone?: string;
   nextRunAt?: Date;
   qstashScheduleId?: string;
+  searchMode?: string;
 }) {
   try {
     const updateData: any = { updatedAt: new Date() };
@@ -786,6 +1638,7 @@ export async function updateLookout({
     if (timezone !== undefined) updateData.timezone = timezone;
     if (nextRunAt !== undefined) updateData.nextRunAt = nextRunAt;
     if (qstashScheduleId !== undefined) updateData.qstashScheduleId = qstashScheduleId;
+    if (searchMode !== undefined) updateData.searchMode = searchMode;
 
     const [updatedLookout] = await db.update(lookout).set(updateData).where(eq(lookout.id, id)).returning();
 
@@ -904,5 +1757,120 @@ export async function deleteLookout({ id }: { id: string }) {
     return deletedLookout;
   } catch (error) {
     throw new ChatSDKError('bad_request:database', 'Failed to delete lookout');
+  }
+}
+
+export async function createBuildSession({
+  chatId,
+  userId,
+  boxId,
+  runtime = 'node',
+}: {
+  chatId: string;
+  userId: string;
+  boxId?: string | null;
+  runtime?: string;
+}) {
+  try {
+    const [created] = await maindb
+      .insert(buildSession)
+      .values({
+        chatId,
+        userId,
+        boxId: boxId ?? null,
+        runtime,
+        status: 'active',
+      })
+      .returning();
+    return created;
+  } catch (error) {
+    console.error('Failed to create agent session:', error);
+    return null;
+  }
+}
+
+export async function updateBuildSession({
+  chatId,
+  status,
+  boxId,
+  runtime,
+  snapshotId,
+  totalCostUsd,
+  totalComputeMs,
+  totalInputTokens,
+  totalOutputTokens,
+}: {
+  chatId: string;
+  status?: string;
+  boxId?: string | null;
+  runtime?: string;
+  snapshotId?: string | null;
+  totalCostUsd?: number | null;
+  totalComputeMs?: number | null;
+  totalInputTokens?: number | null;
+  totalOutputTokens?: number | null;
+}) {
+  try {
+    const updates: Record<string, any> = { updatedAt: new Date() };
+    if (status !== undefined) updates.status = status;
+    if (boxId !== undefined) updates.boxId = boxId;
+    if (runtime !== undefined) updates.runtime = runtime;
+    if (snapshotId !== undefined) updates.snapshotId = snapshotId;
+    if (totalCostUsd !== undefined) updates.totalCostUsd = totalCostUsd;
+    if (totalComputeMs !== undefined) updates.totalComputeMs = totalComputeMs;
+    if (totalInputTokens !== undefined) updates.totalInputTokens = totalInputTokens;
+    if (totalOutputTokens !== undefined) updates.totalOutputTokens = totalOutputTokens;
+    if (status === 'completed' || status === 'error') updates.completedAt = new Date();
+
+    await maindb.update(buildSession).set(updates).where(eq(buildSession.chatId, chatId));
+  } catch (error) {
+    console.error('Failed to update agent session:', error);
+  }
+}
+
+export async function getBuildSessionByChatId({ chatId }: { chatId: string }) {
+  try {
+    const [result] = await maindb.select().from(buildSession).where(eq(buildSession.chatId, chatId)).limit(1);
+    return result ?? null;
+  } catch (error) {
+    console.error('Failed to get agent session:', error);
+    return null;
+  }
+}
+
+export async function getBuildSessionsByUserId({ userId, limit = 20 }: { userId: string; limit?: number }): Promise<
+  Array<{
+    id: string;
+    chatId: string;
+    title: string;
+    status: string;
+    runtime: string;
+    createdAt: Date;
+    updatedAt: Date;
+    completedAt: Date | null;
+  }>
+> {
+  try {
+    const results = await maindb
+      .select({
+        id: buildSession.id,
+        chatId: buildSession.chatId,
+        title: chat.title,
+        status: buildSession.status,
+        runtime: buildSession.runtime,
+        createdAt: buildSession.createdAt,
+        updatedAt: buildSession.updatedAt,
+        completedAt: buildSession.completedAt,
+      })
+      .from(buildSession)
+      .innerJoin(chat, eq(buildSession.chatId, chat.id))
+      .where(eq(buildSession.userId, userId))
+      .orderBy(desc(buildSession.createdAt))
+      .limit(limit);
+
+    return results;
+  } catch (error) {
+    console.error('Failed to get agent sessions:', error);
+    return [];
   }
 }
